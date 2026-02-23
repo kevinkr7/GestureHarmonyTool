@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+
 public class HarmonyController {
 
     private String currentSessionPath;
@@ -22,6 +23,10 @@ public class HarmonyController {
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
+    private Process cameraStreamProcess;
+    private Thread cameraStreamLogThread;
+
+    private static final int CAMERA_STREAM_PORT = 5051;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
@@ -65,6 +70,12 @@ public class HarmonyController {
         // Automatically fetch and populate devices when the UI loads
         loadHardwareDevices();
         hideProcessingOverlay();
+
+        videoDeviceComboBox.valueProperty().addListener((obs, oldDevice, newDevice) -> {
+            if (newDevice != null && currentSessionPath != null && !isRecording) {
+                startCamera();
+            }
+        });
     }
 
     private void loadHardwareDevices() {
@@ -232,6 +243,7 @@ public class HarmonyController {
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+
     }
 
     @FXML
@@ -251,6 +263,9 @@ public class HarmonyController {
         }
 
         isRecording = true;
+
+        // Free the capture device before starting the recorder process.
+        stopCamera();
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
@@ -364,6 +379,9 @@ public class HarmonyController {
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+
+        // Restart live preview after recording has released the camera.
+        startCamera();
     }
 
     private void cleanupFfmpegHandles() {
@@ -375,23 +393,59 @@ public class HarmonyController {
     @FXML
     private WebView cameraView;
 
-    private Process pythonProcess;
 
     public void startCamera() {
+        MediaDevice selectedVideo = videoDeviceComboBox.getValue();
+        if (selectedVideo == null) {
+            status.setText("Camera preview unavailable: no video device selected.");
+            return;
+        }
+
+        String videoSource = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
+
+        stopCamera();
+
+        ProcessBuilder pb = new ProcessBuilder(
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "warning",
+                "-f", "dshow",
+                "-i", "video=\"" + videoSource + "\"",
+                "-an",
+                "-vf", "scale=960:540",
+                "-q:v", "5",
+                "-f", "mjpeg",
+                "-listen", "1",
+                "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/feed"
+        );
+        pb.redirectErrorStream(true);
+
         try {
-            String cameraHtml = """
+            cameraStreamProcess = pb.start();
+
+            cameraStreamLogThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(cameraStreamProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        System.out.println("[camera-preview] " + line);
+                    }
+                } catch (IOException ignored) {
+                }
+            }, "camera-preview-log-drain");
+            cameraStreamLogThread.setDaemon(true);
+            cameraStreamLogThread.start();
+
+
+            String previewHtml = """
                     <!DOCTYPE html>
                     <html lang=\"en\">
                     <head>
                       <meta charset=\"UTF-8\" />
                       <style>
-                        html, body { margin: 0; background: #020617; width: 100%; height: 100%; overflow: hidden; }
+                        html, body { margin: 0; background: #020617; width: 100%; height: 100%; }
                         .wrap { position: relative; width: 100%; height: 100%; }
-                        video {
-                          width: 100%; height: 100%; object-fit: cover;
-                          border-radius: 14px;
-                          transform: scaleX(-1);
-                        }
+                        img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; transform: scaleX(-1); }
                         .badge {
                           position: absolute; top: 16px; left: 16px; padding: 8px 12px;
                           background: rgba(15, 23, 42, 0.7); color: #e2e8f0; border-radius: 999px;
@@ -402,37 +456,45 @@ public class HarmonyController {
                     <body>
                       <div class=\"wrap\">
                         <span class=\"badge\">● Live Camera</span>
-                        <video id=\"preview\" autoplay muted playsinline></video>
+                        <img src=\"http://127.0.0.1:""" + CAMERA_STREAM_PORT + """/feed\" alt=\"Camera feed\" />
                       </div>
-                      <script>
-                        navigator.mediaDevices.getUserMedia({ video: true, audio: false })
-                          .then((stream) => {
-                            document.getElementById('preview').srcObject = stream;
-                          })
-                          .catch(() => {
-                            document.body.innerHTML = '<div style="color:#fda4af;font-family:Arial;padding:24px">Unable to access camera. Please allow camera permission and retry.</div>';
-                          });
-                      </script>
                     </body>
                     </html>
                     """;
 
-            cameraView.getEngine().loadContent(cameraHtml);
+            cameraView.getEngine().loadContent(previewHtml);
             cameraView.setVisible(true);
             cameraView.setManaged(true);
             previewPlaceholder.setVisible(false);
             previewPlaceholder.setManaged(false);
-
+            status.setText("Session ready. Live camera preview is active.");
         } catch (Exception e) {
+            stopCamera();
+            previewPlaceholder.setVisible(true);
+            previewPlaceholder.setManaged(true);
+            cameraView.setVisible(false);
+            cameraView.setManaged(false);
+            status.setText("Unable to open camera preview. Check FFmpeg and camera permissions.");
             e.printStackTrace();
             status.setText("Unable to open camera preview.");
         }
     }
 
     public void stopCamera() {
-        if (pythonProcess != null) {
-            pythonProcess.destroy();
+        if (cameraStreamProcess != null && cameraStreamProcess.isAlive()) {
+            cameraStreamProcess.destroy();
+            try {
+                cameraStreamProcess.waitFor(2, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            if (cameraStreamProcess.isAlive()) {
+                cameraStreamProcess.destroyForcibly();
+            }
         }
+
+        cameraStreamProcess = null;
+        cameraStreamLogThread = null;
     }
 
     private void runPostProcessingPipeline() {
