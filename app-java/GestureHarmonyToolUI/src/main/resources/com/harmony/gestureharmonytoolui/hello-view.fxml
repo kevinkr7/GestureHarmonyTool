@@ -23,7 +23,7 @@
     <Label fx:id="sessionLabel" text="Create a session to start your live camera preview." styleClass="session-pill" wrapText="true"/>
 
     <StackPane prefWidth="920.0" prefHeight="520.0" styleClass="preview-wrapper">
-        <SwingNode fx:id="cameraSwingNode" prefWidth="900.0" prefHeight="500.0" visible="false" managed="false"/>
+        <SwingNode fx:id="cameraSwingNode" visible="false" managed="false"/>
 
         <VBox fx:id="previewPlaceholder" alignment="CENTER" spacing="12.0" styleClass="preview-placeholder">
             <Label text="Live camera preview will appear here" styleClass="placeholder-title"/>
