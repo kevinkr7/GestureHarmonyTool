@@ -4,6 +4,7 @@ import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.scene.control.*;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.VBox;
 import javafx.scene.web.WebView;
 
 import java.io.*;
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+
 public class HarmonyController {
 
     private String currentSessionPath;
@@ -21,11 +23,18 @@ public class HarmonyController {
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
+    private Process cameraStreamProcess;
+    private Thread cameraStreamLogThread;
+
+    private static final int CAMERA_STREAM_PORT = 5051;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
+    @FXML private Label processingMessage;
     @FXML private Button startRecording;
     @FXML private Button stopRecording;
+    @FXML private VBox processingOverlay;
+    @FXML private VBox previewPlaceholder;
 
     // New Dropdowns for Hardware Selection
     @FXML private ComboBox<MediaDevice> videoDeviceComboBox;
@@ -60,6 +69,13 @@ public class HarmonyController {
     public void initialize() {
         // Automatically fetch and populate devices when the UI loads
         loadHardwareDevices();
+        hideProcessingOverlay();
+
+        videoDeviceComboBox.valueProperty().addListener((obs, oldDevice, newDevice) -> {
+            if (newDevice != null && currentSessionPath != null && !isRecording) {
+                startCamera();
+            }
+        });
     }
 
     private void loadHardwareDevices() {
@@ -221,9 +237,13 @@ public class HarmonyController {
         );
 
         sessionLabel.setText("Session created: " + currentSessionPath);
+        status.setText("Session ready. Live camera preview is active.");
+
+        startCamera();
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+
     }
 
     @FXML
@@ -243,6 +263,9 @@ public class HarmonyController {
         }
 
         isRecording = true;
+
+        // Free the capture device before starting the recorder process.
+        stopCamera();
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
@@ -340,12 +363,8 @@ public class HarmonyController {
             }
 
             if (!ffmpegProcess.isAlive()) {
-                status.setText("Recording stopped. (ffmpeg exit " + ffmpegProcess.exitValue() + ")");
-
-                // Keep your Python/FFmpeg follow-up processes running
-                new PythonRunner().runAnalyzeSession(currentSessionPath);
-                new FfmpegUtils().extractWav(currentSessionPath);
-                new PythonRunner().runHarmonizeAudio(currentSessionPath);
+                status.setText("Recording stopped. Rendering final harmony in the background...");
+                runPostProcessingPipeline();
             } else {
                 status.setText("Recording stop timed out; process may still be alive.");
             }
@@ -360,6 +379,9 @@ public class HarmonyController {
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+
+        // Restart live preview after recording has released the camera.
+        startCamera();
     }
 
     private void cleanupFfmpegHandles() {
@@ -371,26 +393,155 @@ public class HarmonyController {
     @FXML
     private WebView cameraView;
 
-    private Process pythonProcess;
 
     public void startCamera() {
+        MediaDevice selectedVideo = videoDeviceComboBox.getValue();
+        if (selectedVideo == null) {
+            status.setText("Camera preview unavailable: no video device selected.");
+            return;
+        }
+
+        String videoSource = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
+
+        stopCamera();
+
+        ProcessBuilder pb = new ProcessBuilder(
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "warning",
+                "-f", "dshow",
+                "-i", "video=\"" + videoSource + "\"",
+                "-an",
+                "-vf", "scale=960:540",
+                "-q:v", "5",
+                "-f", "mjpeg",
+                "-listen", "1",
+                "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/feed"
+        );
+        pb.redirectErrorStream(true);
+
         try {
-            // Start Python Flask server
-            pythonProcess = new ProcessBuilder("python", "live_server.py").start();
+            cameraStreamProcess = pb.start();
 
-            // Wait 1 second for server startup
-            Thread.sleep(1000);
+            cameraStreamLogThread = new Thread(() -> {
+                try (BufferedReader reader = new BufferedReader(
+                        new InputStreamReader(cameraStreamProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        System.out.println("[camera-preview] " + line);
+                    }
+                } catch (IOException ignored) {
+                }
+            }, "camera-preview-log-drain");
+            cameraStreamLogThread.setDaemon(true);
+            cameraStreamLogThread.start();
 
-            cameraView.getEngine().load("http://127.0.0.1:5000/video");
 
+            String previewHtml = """
+                    <!DOCTYPE html>
+                    <html lang=\"en\">
+                    <head>
+                      <meta charset=\"UTF-8\" />
+                      <style>
+                        html, body { margin: 0; background: #020617; width: 100%; height: 100%; }
+                        .wrap { position: relative; width: 100%; height: 100%; }
+                        img { width: 100%; height: 100%; object-fit: cover; border-radius: 14px; transform: scaleX(-1); }
+                        .badge {
+                          position: absolute; top: 16px; left: 16px; padding: 8px 12px;
+                          background: rgba(15, 23, 42, 0.7); color: #e2e8f0; border-radius: 999px;
+                          font: 600 13px Arial, sans-serif;
+                        }
+                      </style>
+                    </head>
+                    <body>
+                      <div class=\"wrap\">
+                        <span class=\"badge\">● Live Camera</span>
+                        <img src=\"http://127.0.0.1:""" + CAMERA_STREAM_PORT + """/feed\" alt=\"Camera feed\" />
+                      </div>
+                    </body>
+                    </html>
+                    """;
+
+            cameraView.getEngine().loadContent(previewHtml);
+            cameraView.setVisible(true);
+            cameraView.setManaged(true);
+            previewPlaceholder.setVisible(false);
+            previewPlaceholder.setManaged(false);
+            status.setText("Session ready. Live camera preview is active.");
         } catch (Exception e) {
+            stopCamera();
+            previewPlaceholder.setVisible(true);
+            previewPlaceholder.setManaged(true);
+            cameraView.setVisible(false);
+            cameraView.setManaged(false);
+            status.setText("Unable to open camera preview. Check FFmpeg and camera permissions.");
             e.printStackTrace();
         }
     }
 
     public void stopCamera() {
-        if (pythonProcess != null) {
-            pythonProcess.destroy();
+        if (cameraStreamProcess != null && cameraStreamProcess.isAlive()) {
+            cameraStreamProcess.destroy();
+            try {
+                cameraStreamProcess.waitFor(2, TimeUnit.SECONDS);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            if (cameraStreamProcess.isAlive()) {
+                cameraStreamProcess.destroyForcibly();
+            }
         }
+
+        cameraStreamProcess = null;
+        cameraStreamLogThread = null;
+    }
+
+    private void runPostProcessingPipeline() {
+        showProcessingOverlay();
+
+        Thread pipelineThread = new Thread(() -> {
+            try {
+                updateProcessingMessage("Analyzing gesture flow...");
+                new PythonRunner().runAnalyzeSession(currentSessionPath);
+
+                updateProcessingMessage("Extracting clean audio for harmony blending...");
+                new FfmpegUtils().extractWav(currentSessionPath);
+
+                updateProcessingMessage("Composing harmonized output...");
+                new PythonRunner().runHarmonizeAudio(currentSessionPath);
+
+                Platform.runLater(() -> {
+                    hideProcessingOverlay();
+                    status.setText("Processing complete! Your harmonized output is ready.");
+                });
+            } catch (Exception e) {
+                Platform.runLater(() -> {
+                    hideProcessingOverlay();
+                    status.setText("Background processing failed. Check logs for details.");
+                });
+                e.printStackTrace();
+            }
+        }, "post-process-pipeline");
+
+        pipelineThread.setDaemon(true);
+        pipelineThread.start();
+    }
+
+    private void showProcessingOverlay() {
+        Platform.runLater(() -> {
+            processingOverlay.setVisible(true);
+            processingOverlay.setManaged(true);
+            updateProcessingMessage("Preparing processing pipeline...");
+        });
+    }
+
+    private void hideProcessingOverlay() {
+        processingOverlay.setVisible(false);
+        processingOverlay.setManaged(false);
+        updateProcessingMessage("");
+    }
+
+    private void updateProcessingMessage(String message) {
+        Platform.runLater(() -> processingMessage.setText(message));
     }
 }
