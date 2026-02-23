@@ -476,6 +476,7 @@ public class HarmonyController {
             cameraView.setManaged(false);
             status.setText("Unable to open camera preview. Check FFmpeg and camera permissions.");
             e.printStackTrace();
+            status.setText("Unable to open camera preview.");
         }
     }
 
