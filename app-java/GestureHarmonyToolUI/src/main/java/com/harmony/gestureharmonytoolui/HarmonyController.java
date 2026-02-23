@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+
 public class HarmonyController {
 
     private String currentSessionPath;
@@ -32,6 +33,10 @@ public class HarmonyController {
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
+    private Process cameraStreamProcess;
+    private Thread cameraStreamLogThread;
+
+    private static final int CAMERA_STREAM_PORT = 5051;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
@@ -277,6 +282,7 @@ public class HarmonyController {
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+
     }
 
     @FXML
