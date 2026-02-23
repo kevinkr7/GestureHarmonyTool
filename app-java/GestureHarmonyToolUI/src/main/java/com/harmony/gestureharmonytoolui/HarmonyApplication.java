@@ -17,10 +17,12 @@ public class HarmonyApplication extends Application {
         stage.setMinWidth(900);
         stage.setMinHeight(700);
         stage.setTitle("Gesture Harmony Studio");
+        HarmonyController controller = fxmlLoader.getController();
+
+        stage.setOnCloseRequest(event -> controller.shutdown());
         stage.setScene(scene);
         stage.show();
 
         File file = new File(AppPaths.SESSIONS);
-
     }
 }
