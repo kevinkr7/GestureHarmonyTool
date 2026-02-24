@@ -281,7 +281,6 @@ public class HarmonyController {
         sessionLabel.setText("Session created: " + currentSessionPath);
         status.setText("Session ready. Live camera preview is active.");
 
-        startCamera();
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
@@ -306,7 +305,6 @@ public class HarmonyController {
 
         isRecording = true;
 
-        stopCamera();
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
@@ -420,7 +418,6 @@ public class HarmonyController {
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
 
-        startCamera();
     }
 
     private void cleanupFfmpegHandles() {
@@ -579,7 +576,6 @@ public class HarmonyController {
     }
 
     public void shutdown() {
-        stopCamera();
     }
 
     private void runPostProcessingPipeline() {

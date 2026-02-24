@@ -17,22 +17,20 @@ public class PythonRunner {
 
             String line;
             while((line = reader.readLine()) != null) {
-                System.out.println(line);
+                System.out.println("[gesture] " + line);
             }
             int exitCode = process.waitFor();
-            System.out.println("Python exited with code: "+exitCode);
+            System.out.println("Gesture analysis exited with code: "+exitCode);
         } catch(Exception e){
             e.printStackTrace();
         }
     }
 
     public void runHarmonizeAudio(String sessionPath){
-        String audioPath = sessionPath+"/audio.wav";
         ProcessBuilder pb = new ProcessBuilder("python", "C:\\College\\Projects\\GestureHarmonyTool\\engine-py\\scripts\\harmonize_audio.py", sessionPath);
         pb.redirectErrorStream(true);
         try{
             Process process = pb.start();
-            process.waitFor();
 
             BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
             String line;
@@ -41,7 +39,7 @@ public class PythonRunner {
             }
 
             int exitCode = process.waitFor();
-            System.out.println("Harmonize with code: "+exitCode);
+            System.out.println("Harmonize exited with code: "+exitCode);
 
         }catch(Exception e){
             e.printStackTrace();
