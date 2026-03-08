@@ -6,6 +6,7 @@ import cv2
 import json
 import mediapipe as mp
 import os
+import threading
 import time
 import numpy as np
 from typing import Optional
@@ -14,6 +15,11 @@ app = Flask(__name__)
 
 mp_hands = mp.solutions.hands
 mp_draw = mp.solutions.drawing_utils
+
+_latest_frame_lock = threading.Lock()
+_latest_jpeg: bytes | None = None
+_stream_stop_event = threading.Event()
+_stream_thread: threading.Thread | None = None
 
 
 def chord_from_fingers(fingers_up: int) -> str:
@@ -131,14 +137,12 @@ def analyze_video_session(session_path: str) -> int:
 
 
 def open_camera(camera_index: int):
-    # Prefer DirectShow on Windows for faster + more reliable initialization.
     cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     if cap.isOpened():
         return cap
 
     cap.release()
-    cap = cv2.VideoCapture(camera_index)
-    return cap
+    return cv2.VideoCapture(camera_index)
 
 
 def encode_status_frame(message: str) -> bytes:
@@ -152,20 +156,27 @@ def encode_status_frame(message: str) -> bytes:
     return buffer.tobytes()
 
 
-def generate_frames(camera_index: int):
+def set_latest_frame(jpg: bytes | None) -> None:
+    global _latest_jpeg
+    with _latest_frame_lock:
+        _latest_jpeg = jpg
+
+
+def get_latest_frame() -> bytes | None:
+    with _latest_frame_lock:
+        return _latest_jpeg
+
+
+def camera_capture_loop(camera_index: int):
     cap = open_camera(camera_index)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     if not cap.isOpened():
         print(f"Failed to open camera index {camera_index}")
-        error_jpg = encode_status_frame("Check camera permissions / index.")
-        while True:
-            if error_jpg:
-                yield (
-                    b'--frame\r\n'
-                    b'Content-Type: image/jpeg\r\n\r\n' + error_jpg + b'\r\n'
-                )
+        set_latest_frame(encode_status_frame("Check camera permissions / index."))
+        while not _stream_stop_event.is_set():
             time.sleep(0.2)
+        return
 
     hands = mp_hands.Hands(
         static_image_mode=False,
@@ -175,37 +186,44 @@ def generate_frames(camera_index: int):
     )
 
     try:
-        while True:
+        while not _stream_stop_event.is_set():
             success, frame = cap.read()
             if not success:
                 time.sleep(0.01)
                 continue
 
             current_chord = detect_chord(frame, hands)
-
             cv2.rectangle(frame, (20, 20), (350, 100), (0, 0, 0), -1)
-            cv2.putText(
-                frame,
-                f"Chord: {current_chord}",
-                (40, 75),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 255, 0),
-                3,
-            )
+            cv2.putText(frame, f"Chord: {current_chord}", (40, 75), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
 
             ret, buffer = cv2.imencode('.jpg', frame)
             if not ret:
                 continue
-            jpg = buffer.tobytes()
+            set_latest_frame(buffer.tobytes())
+    finally:
+        cap.release()
+        hands.close()
 
+
+def ensure_stream_worker(camera_index: int):
+    global _stream_thread
+    if _stream_thread is not None and _stream_thread.is_alive():
+        return
+
+    _stream_stop_event.clear()
+    _stream_thread = threading.Thread(target=camera_capture_loop, args=(camera_index,), daemon=True, name="gesture-camera-loop")
+    _stream_thread.start()
+
+
+def generate_frames():
+    while True:
+        jpg = get_latest_frame()
+        if jpg:
             yield (
                 b'--frame\r\n'
                 b'Content-Type: image/jpeg\r\n\r\n' + jpg + b'\r\n'
             )
-    finally:
-        cap.release()
-        hands.close()
+        time.sleep(0.03)
 
 
 @app.route('/')
@@ -226,10 +244,17 @@ def health():
     return {"status": "ok"}
 
 
+@app.route('/frame')
+def frame():
+    jpg = get_latest_frame()
+    if not jpg:
+        jpg = encode_status_frame("Initializing camera stream...")
+    return Response(jpg, mimetype='image/jpeg')
+
+
 @app.route('/video')
 def video():
-    return Response(generate_frames(app.config.get("camera_index", 0)),
-                    mimetype='multipart/x-mixed-replace; boundary=frame')
+    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 
 def main() -> int:
@@ -242,7 +267,7 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.serve:
-        app.config["camera_index"] = args.camera_index
+        ensure_stream_worker(args.camera_index)
         app.run(host=args.host, port=args.port, threaded=True)
         return 0
 

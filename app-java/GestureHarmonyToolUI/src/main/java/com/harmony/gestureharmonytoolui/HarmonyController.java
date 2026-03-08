@@ -6,10 +6,11 @@ import javafx.scene.control.*;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
-import javafx.scene.web.WebView;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
@@ -22,6 +23,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class HarmonyController {
@@ -37,6 +40,7 @@ public class HarmonyController {
     private static final int CAMERA_STREAM_PORT = 5051;
 
     private MediaPlayer previewMediaPlayer;
+    private ScheduledExecutorService feedbackFramePoller;
     private Path harmonizedVideoPath;
 
     @FXML private Label sessionLabel;
@@ -52,7 +56,7 @@ public class HarmonyController {
     @FXML private ComboBox<MediaDevice> videoDeviceComboBox;
     @FXML private ComboBox<MediaDevice> audioDeviceComboBox;
 
-    @FXML private WebView feedbackWebView;
+    @FXML private ImageView feedbackImageView;
     @FXML private MediaView outputMediaView;
 
     public static class MediaDevice {
@@ -445,18 +449,17 @@ public class HarmonyController {
                 return false;
             }
 
-            String streamUrl = "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/?ts=" + System.currentTimeMillis();
             Platform.runLater(() -> {
                 stopPreviewPlayer();
                 outputMediaView.setVisible(false);
                 outputMediaView.setManaged(false);
-                feedbackWebView.setVisible(true);
-                feedbackWebView.setManaged(true);
+                feedbackImageView.setVisible(true);
+                feedbackImageView.setManaged(true);
                 previewPlaceholder.setVisible(false);
                 previewPlaceholder.setManaged(false);
-                feedbackWebView.getEngine().load(streamUrl);
             });
 
+            startFeedbackFramePolling();
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -519,7 +522,55 @@ public class HarmonyController {
         }
 
         cameraStreamLogThread = null;
-        Platform.runLater(() -> feedbackWebView.getEngine().load("about:blank"));
+        stopFeedbackFramePolling();
+        Platform.runLater(() -> feedbackImageView.setImage(null));
+    }
+
+
+    private void startFeedbackFramePolling() {
+        stopFeedbackFramePolling();
+
+        feedbackFramePoller = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "feedback-frame-poller");
+            thread.setDaemon(true);
+            return thread;
+        });
+
+        feedbackFramePoller.scheduleAtFixedRate(() -> {
+            Process streamProcess = cameraStreamProcess;
+            if (streamProcess == null || !streamProcess.isAlive()) {
+                return;
+            }
+
+            HttpURLConnection connection = null;
+            try {
+                URL frameUrl = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + "/frame?ts=" + System.nanoTime());
+                connection = (HttpURLConnection) frameUrl.openConnection();
+                connection.setConnectTimeout(600);
+                connection.setReadTimeout(1200);
+                connection.setUseCaches(false);
+
+                try (InputStream inputStream = connection.getInputStream()) {
+                    Image frameImage = new Image(inputStream);
+                    if (!frameImage.isError()) {
+                        Platform.runLater(() -> feedbackImageView.setImage(frameImage));
+                    }
+                }
+            } catch (IOException ignored) {
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+        }, 0, 120, TimeUnit.MILLISECONDS);
+    }
+
+    private void stopFeedbackFramePolling() {
+        ScheduledExecutorService poller = feedbackFramePoller;
+        feedbackFramePoller = null;
+        if (poller != null) {
+            poller.shutdownNow();
+        }
     }
 
     private void runPostProcessingPipeline() {
@@ -599,8 +650,8 @@ public class HarmonyController {
     private void showVideoPreview(Path videoPath) {
         stopPreviewPlayer();
 
-        feedbackWebView.setVisible(false);
-        feedbackWebView.setManaged(false);
+        feedbackImageView.setVisible(false);
+        feedbackImageView.setManaged(false);
         previewPlaceholder.setVisible(false);
         previewPlaceholder.setManaged(false);
         outputMediaView.setVisible(true);
@@ -625,8 +676,8 @@ public class HarmonyController {
 
     private void showPlaceholder(String title, String subtitle) {
         hideVideoPreview();
-        feedbackWebView.setVisible(false);
-        feedbackWebView.setManaged(false);
+        feedbackImageView.setVisible(false);
+        feedbackImageView.setManaged(false);
 
         if (!previewPlaceholder.getChildren().isEmpty() && previewPlaceholder.getChildren().size() >= 2) {
             if (previewPlaceholder.getChildren().get(0) instanceof Label titleLabel) {

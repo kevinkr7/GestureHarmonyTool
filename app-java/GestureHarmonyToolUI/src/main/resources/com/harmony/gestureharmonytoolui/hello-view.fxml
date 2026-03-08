@@ -8,8 +8,8 @@
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
+<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.media.MediaView?>
-<?import javafx.scene.web.WebView?>
 
 <VBox alignment="TOP_CENTER" spacing="16.0"
       styleClass="root-shell"
@@ -24,7 +24,7 @@
     <Label fx:id="sessionLabel" text="Create a session to start your live camera preview." styleClass="session-pill" wrapText="true"/>
 
     <StackPane prefWidth="920.0" prefHeight="520.0" styleClass="preview-wrapper">
-        <WebView fx:id="feedbackWebView" visible="false" managed="false" prefWidth="920.0" prefHeight="520.0"/>
+        <ImageView fx:id="feedbackImageView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
         <MediaView fx:id="outputMediaView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
 
         <VBox fx:id="previewPlaceholder" alignment="CENTER" spacing="12.0" styleClass="preview-placeholder">
