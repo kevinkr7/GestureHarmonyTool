@@ -624,17 +624,26 @@ public class HarmonyController {
 
         Thread pipelineThread = new Thread(() -> {
             try {
-                updateProcessingMessage("Analyzing gesture flow...");
+                Path sessionDir = Path.of(currentSessionPath);
+
+                updateProcessingMessage("Creating gesture timeline (timeline.json)...");
                 new PythonRunner().runAnalyzeSession(currentSessionPath);
+                ensureFileExists(sessionDir.resolve("timeline.json"), "Timeline was not generated");
 
                 updateProcessingMessage("Extracting clean audio for harmony blending...");
-                new FfmpegUtils().extractWav(currentSessionPath);
+                String extractedWav = new FfmpegUtils().extractWav(currentSessionPath);
+                if (extractedWav == null) {
+                    throw new IOException("Audio extraction failed: output.wav was not created.");
+                }
+                ensureFileExists(Path.of(extractedWav), "Extracted wav file missing");
 
-                updateProcessingMessage("Composing harmonized output...");
+                updateProcessingMessage("Generating harmonized audio...");
                 new PythonRunner().runHarmonizeAudio(currentSessionPath);
+                Path harmonizedAudio = resolveHarmonizedAudio(sessionDir);
+                ensureFileExists(harmonizedAudio, "Harmonized audio was not generated");
 
-                updateProcessingMessage("Building harmonized video preview...");
-                Path outputVideo = muxFinalVideo(Path.of(currentSessionPath));
+                updateProcessingMessage("Merging recorded video with harmonized audio...");
+                Path outputVideo = muxFinalVideo(sessionDir);
                 harmonizedVideoPath = outputVideo;
 
                 Platform.runLater(() -> {
@@ -650,7 +659,7 @@ public class HarmonyController {
                     hideProcessingOverlay();
                     startRecording.setDisable(false);
                     stopRecording.setDisable(true);
-                    status.setText("Background processing failed. Check logs for details.");
+                    status.setText("Background processing failed: " + e.getMessage());
                 });
                 e.printStackTrace();
             }
@@ -658,6 +667,13 @@ public class HarmonyController {
 
         pipelineThread.setDaemon(true);
         pipelineThread.start();
+    }
+
+
+    private void ensureFileExists(Path path, String message) throws IOException {
+        if (!Files.exists(path) || Files.size(path) == 0) {
+            throw new IOException(message + ": " + path);
+        }
     }
 
     private Path muxFinalVideo(Path sessionDir) throws IOException, InterruptedException {
