@@ -108,24 +108,57 @@ public class HarmonyController {
 
                 String line;
                 MediaDevice currentDevice = null;
+                final int SECTION_NONE = 0;
+                final int SECTION_VIDEO = 1;
+                final int SECTION_AUDIO = 2;
+                int currentSection = SECTION_NONE;
 
                 while ((line = reader.readLine()) != null) {
                     System.out.println("[Device Scan] " + line);
                     String lowerLine = line.toLowerCase();
 
-                    if (line.contains("\"")) {
-                        String extractedName = extractBetweenQuotes(line);
-                        if (extractedName == null) continue;
+                    if (lowerLine.contains("directshow video devices")) {
+                        currentSection = SECTION_VIDEO;
+                        currentDevice = null;
+                        continue;
+                    }
+                    if (lowerLine.contains("directshow audio devices")) {
+                        currentSection = SECTION_AUDIO;
+                        currentDevice = null;
+                        continue;
+                    }
 
-                        if (lowerLine.contains("(video)")) {
-                            currentDevice = new MediaDevice(extractedName);
-                            videoDevices.add(currentDevice);
-                        } else if (lowerLine.contains("(audio)")) {
-                            currentDevice = new MediaDevice(extractedName);
-                            audioDevices.add(currentDevice);
-                        } else if (lowerLine.contains("alternative name") && currentDevice != null) {
-                            currentDevice.setAltName(extractedName);
-                        }
+                    if (!line.contains("\"")) {
+                        continue;
+                    }
+
+                    String extractedName = extractBetweenQuotes(line);
+                    if (extractedName == null) {
+                        continue;
+                    }
+
+                    if (lowerLine.contains("alternative name") && currentDevice != null) {
+                        currentDevice.setAltName(extractedName);
+                        continue;
+                    }
+
+                    if (lowerLine.contains("(video)")) {
+                        currentDevice = new MediaDevice(extractedName);
+                        videoDevices.add(currentDevice);
+                        continue;
+                    }
+                    if (lowerLine.contains("(audio)")) {
+                        currentDevice = new MediaDevice(extractedName);
+                        audioDevices.add(currentDevice);
+                        continue;
+                    }
+
+                    if (currentSection == SECTION_VIDEO) {
+                        currentDevice = new MediaDevice(extractedName);
+                        videoDevices.add(currentDevice);
+                    } else if (currentSection == SECTION_AUDIO) {
+                        currentDevice = new MediaDevice(extractedName);
+                        audioDevices.add(currentDevice);
                     }
                 }
 
@@ -273,8 +306,8 @@ public class HarmonyController {
 
         String videoPath = sessionDir.resolve("video.mp4").toString();
 
-        String videoAlt = selectedVideo.getAltName();
-        String audioAlt = selectedAudio.getAltName();
+        String videoAlt = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
+        String audioAlt = selectedAudio.getAltName() != null ? selectedAudio.getAltName() : selectedAudio.toString();
         String device = "video=\"" + videoAlt + "\":audio=\"" + audioAlt + "\"";
 
         ProcessBuilder pb = new ProcessBuilder(
