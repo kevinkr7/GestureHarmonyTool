@@ -395,15 +395,23 @@ public class HarmonyController {
                 ffmpegStdin.flush();
             }
 
-            boolean exited = ffmpegProcess.waitFor(5, TimeUnit.SECONDS);
+            boolean exited = ffmpegProcess.waitFor(20, TimeUnit.SECONDS);
 
             if (!exited && ffmpegProcess.isAlive()) {
+                status.setText("Finalizing recording took too long; forcing stop...");
                 ffmpegProcess.destroyForcibly();
                 ffmpegProcess.waitFor(3, TimeUnit.SECONDS);
             }
 
             if (!ffmpegProcess.isAlive()) {
                 stopLiveFeedbackStream();
+                Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
+                if (!waitForRecordedVideoReady(recordedVideo)) {
+                    status.setText("Recording stopped, but video file is incomplete. Please record again.");
+                    startRecording.setDisable(false);
+                    return;
+                }
+
                 status.setText("Recording stopped. Rendering harmonized output...");
                 runPostProcessingPipeline();
             } else {
@@ -418,6 +426,70 @@ public class HarmonyController {
         } finally {
             try { if (ffmpegStdin != null) ffmpegStdin.close(); } catch (IOException ignored) {}
             cleanupFfmpegHandles();
+        }
+    }
+
+
+    private boolean waitForRecordedVideoReady(Path recordedVideo) {
+        if (!Files.exists(recordedVideo)) {
+            return false;
+        }
+
+        long deadline = System.currentTimeMillis() + 15000;
+        while (System.currentTimeMillis() < deadline) {
+            if (isVideoContainerReadable(recordedVideo)) {
+                return true;
+            }
+
+            try {
+                Thread.sleep(500);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        return isVideoContainerReadable(recordedVideo);
+    }
+
+    private boolean isVideoContainerReadable(Path recordedVideo) {
+        try {
+            if (!Files.exists(recordedVideo) || Files.size(recordedVideo) < 1024) {
+                return false;
+            }
+        } catch (IOException e) {
+            return false;
+        }
+
+        ProcessBuilder pb = new ProcessBuilder(
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                recordedVideo.toString()
+        );
+        pb.redirectErrorStream(true);
+
+        try {
+            Process process = pb.start();
+            String output;
+            try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                output = br.readLine();
+            }
+            boolean exited = process.waitFor(2, TimeUnit.SECONDS);
+            if (!exited) {
+                process.destroyForcibly();
+                return false;
+            }
+
+            if (process.exitValue() != 0 || output == null || output.isBlank()) {
+                return false;
+            }
+
+            double duration = Double.parseDouble(output.trim());
+            return duration > 0.0;
+        } catch (Exception ignored) {
+            return false;
         }
     }
 
