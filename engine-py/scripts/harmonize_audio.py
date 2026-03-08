@@ -4,7 +4,7 @@ import json
 import math
 import os
 import sys
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
 import librosa

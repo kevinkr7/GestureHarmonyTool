@@ -153,19 +153,32 @@ public class HarmonyController {
 
                 String line;
                 MediaDevice currentDevice = null;
+                boolean inVideoSection = false;
+                boolean inAudioSection = false;
 
                 while ((line = reader.readLine()) != null) {
                     System.out.println("[Device Scan] " + line);
                     String lowerLine = line.toLowerCase();
 
+                    if (lowerLine.contains("directshow video devices")) {
+                        inVideoSection = true;
+                        inAudioSection = false;
+                        continue;
+                    }
+                    if (lowerLine.contains("directshow audio devices")) {
+                        inVideoSection = false;
+                        inAudioSection = true;
+                        continue;
+                    }
+
                     if (line.contains("\"")) {
                         String extractedName = extractBetweenQuotes(line);
                         if (extractedName == null) continue;
 
-                        if (lowerLine.contains("(video)")) {
+                        if (lowerLine.contains("(video)") || (inVideoSection && !lowerLine.contains("alternative name"))) {
                             currentDevice = new MediaDevice(extractedName);
                             videoDevices.add(currentDevice);
-                        } else if (lowerLine.contains("(audio)")) {
+                        } else if (lowerLine.contains("(audio)") || (inAudioSection && !lowerLine.contains("alternative name"))) {
                             currentDevice = new MediaDevice(extractedName);
                             audioDevices.add(currentDevice);
                         } else if (lowerLine.contains("alternative name") && currentDevice != null) {
@@ -281,7 +294,6 @@ public class HarmonyController {
         sessionLabel.setText("Session created: " + currentSessionPath);
         status.setText("Session ready. Live camera preview is active.");
 
-        startCamera();
 
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
@@ -306,7 +318,6 @@ public class HarmonyController {
 
         isRecording = true;
 
-        stopCamera();
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
@@ -420,7 +431,6 @@ public class HarmonyController {
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
 
-        startCamera();
     }
 
     private void cleanupFfmpegHandles() {
@@ -579,7 +589,6 @@ public class HarmonyController {
     }
 
     public void shutdown() {
-        stopCamera();
     }
 
     private void runPostProcessingPipeline() {
