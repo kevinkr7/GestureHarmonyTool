@@ -14,6 +14,8 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
 import java.io.*;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -438,13 +440,12 @@ public class HarmonyController {
             cameraStreamLogThread.setDaemon(true);
             cameraStreamLogThread.start();
 
-            Thread.sleep(1000);
-            if (!cameraStreamProcess.isAlive()) {
-                status.setText("Live feedback stream exited unexpectedly.");
+            if (!waitForLiveFeedbackEndpoint()) {
+                status.setText("Live feedback stream did not become ready.");
                 return false;
             }
 
-            String streamUrl = "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/video?ts=" + System.currentTimeMillis();
+            String streamUrl = "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/?ts=" + System.currentTimeMillis();
             Platform.runLater(() -> {
                 stopPreviewPlayer();
                 outputMediaView.setVisible(false);
@@ -462,6 +463,43 @@ public class HarmonyController {
             status.setText("Failed to launch Python live feedback stream.");
             return false;
         }
+    }
+
+
+    private boolean waitForLiveFeedbackEndpoint() {
+        long deadline = System.currentTimeMillis() + 8000;
+
+        while (System.currentTimeMillis() < deadline) {
+            if (cameraStreamProcess == null || !cameraStreamProcess.isAlive()) {
+                return false;
+            }
+
+            HttpURLConnection connection = null;
+            try {
+                URL url = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + "/health");
+                connection = (HttpURLConnection) url.openConnection();
+                connection.setConnectTimeout(500);
+                connection.setReadTimeout(500);
+                int code = connection.getResponseCode();
+                if (code == 200) {
+                    return true;
+                }
+            } catch (IOException ignored) {
+            } finally {
+                if (connection != null) {
+                    connection.disconnect();
+                }
+            }
+
+            try {
+                Thread.sleep(250);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+
+        return false;
     }
 
     private void stopLiveFeedbackStream() {

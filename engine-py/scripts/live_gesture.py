@@ -6,6 +6,8 @@ import cv2
 import json
 import mediapipe as mp
 import os
+import time
+import numpy as np
 from typing import Optional
 
 app = Flask(__name__)
@@ -128,9 +130,42 @@ def analyze_video_session(session_path: str) -> int:
     return 0
 
 
-def generate_frames(camera_index: int):
+def open_camera(camera_index: int):
+    # Prefer DirectShow on Windows for faster + more reliable initialization.
+    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+    if cap.isOpened():
+        return cap
+
+    cap.release()
     cap = cv2.VideoCapture(camera_index)
+    return cap
+
+
+def encode_status_frame(message: str) -> bytes:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    frame[:] = (20, 20, 20)
+    cv2.putText(frame, "Gesture stream unavailable", (20, 220), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 200, 255), 2)
+    cv2.putText(frame, message, (20, 270), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+    ret, buffer = cv2.imencode('.jpg', frame)
+    if not ret:
+        return b""
+    return buffer.tobytes()
+
+
+def generate_frames(camera_index: int):
+    cap = open_camera(camera_index)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    if not cap.isOpened():
+        print(f"Failed to open camera index {camera_index}")
+        error_jpg = encode_status_frame("Check camera permissions / index.")
+        while True:
+            if error_jpg:
+                yield (
+                    b'--frame\r\n'
+                    b'Content-Type: image/jpeg\r\n\r\n' + error_jpg + b'\r\n'
+                )
+            time.sleep(0.2)
 
     hands = mp_hands.Hands(
         static_image_mode=False,
@@ -143,7 +178,8 @@ def generate_frames(camera_index: int):
         while True:
             success, frame = cap.read()
             if not success:
-                break
+                time.sleep(0.01)
+                continue
 
             current_chord = detect_chord(frame, hands)
 
@@ -170,6 +206,24 @@ def generate_frames(camera_index: int):
     finally:
         cap.release()
         hands.close()
+
+
+@app.route('/')
+def index():
+    return """
+    <!doctype html>
+    <html>
+      <head><meta charset=\"utf-8\"><title>Gesture Live Feedback</title></head>
+      <body style=\"margin:0;background:#020617;display:flex;align-items:center;justify-content:center;min-height:100vh;\">
+        <img src=\"/video\" alt=\"live feedback\" style=\"max-width:100%;max-height:100vh;\" />
+      </body>
+    </html>
+    """
+
+
+@app.route('/health')
+def health():
+    return {"status": "ok"}
 
 
 @app.route('/video')
