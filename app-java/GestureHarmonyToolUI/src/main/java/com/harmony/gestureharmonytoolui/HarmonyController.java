@@ -406,6 +406,7 @@ public class HarmonyController {
             }
 
             boolean exited = process.waitFor(20, TimeUnit.SECONDS);
+            int exitCode = exited ? process.exitValue() : Integer.MIN_VALUE;
             if (!exited && process.isAlive()) {
                 Platform.runLater(() -> status.setText("Finalizing recording took too long; forcing stop..."));
                 process.destroyForcibly();
@@ -423,7 +424,7 @@ public class HarmonyController {
 
             stopLiveFeedbackStream();
             Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
-            if (!waitForRecordedVideoReady(recordedVideo)) {
+            if (!waitForRecordedVideoReady(recordedVideo, exitCode)) {
                 Platform.runLater(() -> {
                     status.setText("Recording stopped, but video file is incomplete. Please record again.");
                     startRecording.setDisable(false);
@@ -453,9 +454,19 @@ public class HarmonyController {
     }
 
 
-    private boolean waitForRecordedVideoReady(Path recordedVideo) {
+    private boolean waitForRecordedVideoReady(Path recordedVideo, int recordingExitCode) {
         if (!Files.exists(recordedVideo)) {
             return false;
+        }
+
+        if (recordingExitCode == 0) {
+            try {
+                long size = Files.size(recordedVideo);
+                if (size > 4096) {
+                    return true;
+                }
+            } catch (IOException ignored) {
+            }
         }
 
         long deadline = System.currentTimeMillis() + 15000;
@@ -469,9 +480,9 @@ public class HarmonyController {
 
             try {
                 long currentSize = Files.exists(recordedVideo) ? Files.size(recordedVideo) : -1;
-                if (currentSize > 64 * 1024 && currentSize == lastSize) {
+                if (currentSize > 4096 && currentSize == lastSize) {
                     stableCount++;
-                    if (stableCount >= 3) {
+                    if (stableCount >= 2) {
                         return true;
                     }
                 } else {
@@ -485,7 +496,7 @@ public class HarmonyController {
             }
         }
 
-        return isVideoContainerReadable(recordedVideo) || stableCount >= 3;
+        return isVideoContainerReadable(recordedVideo) || stableCount >= 2;
     }
 
     private boolean isVideoContainerReadable(Path recordedVideo) {
