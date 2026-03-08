@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -661,10 +662,14 @@ public class HarmonyController {
 
     private Path muxFinalVideo(Path sessionDir) throws IOException, InterruptedException {
         Path inputVideo = sessionDir.resolve("video.mp4");
-        Path harmonizedAudio = sessionDir.resolve("harmonized_enhanced.wav");
+        Path harmonizedAudio = resolveHarmonizedAudio(sessionDir);
         Path finalVideo = sessionDir.resolve("harmonized_video.mp4");
 
-        ProcessBuilder pb = new ProcessBuilder(
+        if (!Files.exists(inputVideo)) {
+            throw new IOException("Recorded video not found: " + inputVideo);
+        }
+
+        List<String> copyMuxCommand = List.of(
                 "ffmpeg", "-y",
                 "-i", inputVideo.toString(),
                 "-i", harmonizedAudio.toString(),
@@ -675,21 +680,87 @@ public class HarmonyController {
                 "-shortest",
                 finalVideo.toString()
         );
+
+        FfmpegRunResult copyResult = runFfmpeg(copyMuxCommand, "ffmpeg-mux-copy");
+        if (copyResult.exitCode == 0 && Files.exists(finalVideo)) {
+            return finalVideo;
+        }
+
+        System.out.println("[ffmpeg-mux] Copy mux failed, retrying with video re-encode...");
+
+        List<String> transcodeMuxCommand = List.of(
+                "ffmpeg", "-y",
+                "-i", inputVideo.toString(),
+                "-i", harmonizedAudio.toString(),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-shortest",
+                finalVideo.toString()
+        );
+
+        FfmpegRunResult transcodeResult = runFfmpeg(transcodeMuxCommand, "ffmpeg-mux-transcode");
+        if (transcodeResult.exitCode != 0 || !Files.exists(finalVideo)) {
+            String copyTail = copyResult.recentLogs.stream().collect(Collectors.joining(" | "));
+            String transcodeTail = transcodeResult.recentLogs.stream().collect(Collectors.joining(" | "));
+            throw new IOException("Failed to build harmonized video preview. copyExit=" + copyResult.exitCode
+                    + ", transcodeExit=" + transcodeResult.exitCode
+                    + ", copyLogs=" + copyTail
+                    + ", transcodeLogs=" + transcodeTail);
+        }
+
+        return finalVideo;
+    }
+
+    private Path resolveHarmonizedAudio(Path sessionDir) throws IOException {
+        List<Path> candidates = List.of(
+                sessionDir.resolve("harmonized_enhanced.wav"),
+                sessionDir.resolve("harmonized.wav"),
+                sessionDir.resolve("output.wav")
+        );
+
+        for (Path candidate : candidates) {
+            if (Files.exists(candidate) && Files.size(candidate) > 0) {
+                return candidate;
+            }
+        }
+
+        throw new IOException("No harmonized audio file found. Expected one of: " + candidates);
+    }
+
+    private FfmpegRunResult runFfmpeg(List<String> command, String tag) throws IOException, InterruptedException {
+        ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
+        List<String> recentLogs = new ArrayList<>();
         try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
             String line;
             while ((line = br.readLine()) != null) {
-                System.out.println("[ffmpeg-mux] " + line);
+                System.out.println("[" + tag + "] " + line);
+                recentLogs.add(line);
+                if (recentLogs.size() > 40) {
+                    recentLogs.remove(0);
+                }
             }
         }
 
         int exit = process.waitFor();
-        if (exit != 0 || !Files.exists(finalVideo)) {
-            throw new IOException("Failed to build harmonized video preview.");
+        return new FfmpegRunResult(exit, recentLogs);
+    }
+
+    private static class FfmpegRunResult {
+        private final int exitCode;
+        private final List<String> recentLogs;
+
+        private FfmpegRunResult(int exitCode, List<String> recentLogs) {
+            this.exitCode = exitCode;
+            this.recentLogs = recentLogs;
         }
-        return finalVideo;
     }
 
     private void showVideoPreview(Path videoPath) {
