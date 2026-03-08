@@ -6,7 +6,7 @@ import java.io.InputStreamReader;
 
 public class PythonRunner {
     public void runAnalyzeSession(String sessionPath){
-        String scriptPath = "C:\\College\\Projects\\GestureHarmonyTool\\engine-py\\scripts\\live_gesture.py";
+        String scriptPath = AppPaths.ENGINE + "\\scripts\\live_gesture.py";
         ProcessBuilder pb = new ProcessBuilder("python", scriptPath, sessionPath);
         pb.redirectErrorStream(true);
         pb.directory(new File("."));
@@ -27,7 +27,7 @@ public class PythonRunner {
     }
 
     public void runHarmonizeAudio(String sessionPath){
-        ProcessBuilder pb = new ProcessBuilder("python", "C:\\College\\Projects\\GestureHarmonyTool\\engine-py\\scripts\\harmonize_audio.py", sessionPath);
+        ProcessBuilder pb = new ProcessBuilder("python", AppPaths.ENGINE + "\\scripts\\harmonize_audio.py", sessionPath);
         pb.redirectErrorStream(true);
         try{
             Process process = pb.start();

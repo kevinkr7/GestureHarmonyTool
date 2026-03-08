@@ -4,30 +4,23 @@ import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.scene.control.*;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
-import javafx.embed.swing.SwingNode;
+import javafx.scene.media.Media;
+import javafx.scene.media.MediaPlayer;
+import javafx.scene.media.MediaView;
+import javafx.scene.web.WebView;
+import javafx.stage.DirectoryChooser;
+import javafx.stage.Window;
 
-import nu.pattern.OpenCV;
-import org.opencv.core.Mat;
-import org.opencv.imgproc.Imgproc;
-import org.opencv.videoio.VideoCapture;
-
-import javax.swing.*;
-import java.awt.Color;
-import java.awt.Graphics;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
-import java.awt.image.BufferedImage;
-import java.awt.image.DataBufferByte;
 import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-
 
 public class HarmonyController {
 
@@ -36,31 +29,29 @@ public class HarmonyController {
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
+
     private Process cameraStreamProcess;
     private Thread cameraStreamLogThread;
-
     private static final int CAMERA_STREAM_PORT = 5051;
+
+    private MediaPlayer previewMediaPlayer;
+    private Path harmonizedVideoPath;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
     @FXML private Label processingMessage;
     @FXML private Button startRecording;
     @FXML private Button stopRecording;
+    @FXML private Button saveVideoButton;
     @FXML private VBox processingOverlay;
     @FXML private VBox previewPlaceholder;
+    @FXML private HBox previewActions;
 
     @FXML private ComboBox<MediaDevice> videoDeviceComboBox;
     @FXML private ComboBox<MediaDevice> audioDeviceComboBox;
 
-    @FXML private SwingNode cameraSwingNode;
-
-    private JPanel cameraPanel;
-    private volatile BufferedImage currentFrame;
-    private volatile VideoCapture videoCapture;
-    private Thread captureThread;
-    private Timer repaintTimer;
-    private final AtomicBoolean cameraRunning = new AtomicBoolean(false);
-    private static volatile boolean openCvLoaded = false;
+    @FXML private WebView feedbackWebView;
+    @FXML private MediaView outputMediaView;
 
     public static class MediaDevice {
         private final String name;
@@ -86,51 +77,9 @@ public class HarmonyController {
 
     @FXML
     public void initialize() {
-        initializeSwingCameraPanel();
         loadHardwareDevices();
         hideProcessingOverlay();
-
-        videoDeviceComboBox.valueProperty().addListener((obs, oldDevice, newDevice) -> {
-            if (newDevice != null && currentSessionPath != null && !isRecording) {
-                startCamera();
-            }
-        });
-    }
-
-    private void initializeSwingCameraPanel() {
-        SwingUtilities.invokeLater(() -> {
-            cameraPanel = new JPanel() {
-                @Override
-                protected void paintComponent(Graphics g) {
-                    super.paintComponent(g);
-                    BufferedImage frame = currentFrame;
-                    if (frame == null) {
-                        return;
-                    }
-
-                    Graphics2D g2 = (Graphics2D) g.create();
-                    g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-
-                    int panelW = getWidth();
-                    int panelH = getHeight();
-                    int imageW = frame.getWidth();
-                    int imageH = frame.getHeight();
-
-                    double scale = Math.min((double) panelW / imageW, (double) panelH / imageH);
-                    int drawW = (int) (imageW * scale);
-                    int drawH = (int) (imageH * scale);
-                    int x = (panelW - drawW) / 2;
-                    int y = (panelH - drawH) / 2;
-
-                    g2.drawImage(frame, x + drawW, y, -drawW, drawH, null);
-                    g2.dispose();
-                }
-            };
-
-            cameraPanel.setDoubleBuffered(true);
-            cameraPanel.setBackground(new Color(2, 6, 23));
-            cameraSwingNode.setContent(cameraPanel);
-        });
+        showPlaceholder("Live camera preview will appear here", "Click Create Session to start real-time gesture feedback.");
     }
 
     private void loadHardwareDevices() {
@@ -197,7 +146,7 @@ public class HarmonyController {
                 status.setText("Devices loaded successfully.");
             });
 
-        }).start();
+        }, "device-loader").start();
     }
 
     private String extractBetweenQuotes(String text) {
@@ -269,22 +218,18 @@ public class HarmonyController {
         }
 
         currentSessionPath = SessionManager.createNewSession();
-
-        SessionManager.writeConfig(
-                currentSessionPath,
-                config.key,
-                config.scale,
-                config.voices,
-                config.mix
-        );
+        SessionManager.writeConfig(currentSessionPath, config.key, config.scale, config.voices, config.mix);
 
         sessionLabel.setText("Session created: " + currentSessionPath);
-        status.setText("Session ready. Live camera preview is active.");
-
-
         startRecording.setDisable(false);
         stopRecording.setDisable(true);
+        saveVideoButton.setDisable(true);
 
+        hideVideoPreview();
+        boolean streamStarted = startLiveFeedbackStream();
+        if (streamStarted) {
+            status.setText("Session ready. Real-time gesture feedback is active.");
+        }
     }
 
     @FXML
@@ -295,6 +240,11 @@ public class HarmonyController {
         }
         if (isRecording) return;
 
+        if (!isLiveFeedbackRunning() && !startLiveFeedbackStream()) {
+            status.setText("Unable to start live feedback stream.");
+            return;
+        }
+
         MediaDevice selectedVideo = videoDeviceComboBox.getValue();
         MediaDevice selectedAudio = audioDeviceComboBox.getValue();
 
@@ -304,7 +254,6 @@ public class HarmonyController {
         }
 
         isRecording = true;
-
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
@@ -357,7 +306,7 @@ public class HarmonyController {
             ffmpegLogThread.setDaemon(true);
             ffmpegLogThread.start();
 
-            status.setText("Recording started...");
+            status.setText("Recording started. Gesture feedback is visible live.");
 
         } catch (Exception e) {
             status.setText("Failed to start recording (ffmpeg).");
@@ -379,11 +328,12 @@ public class HarmonyController {
         isRecording = false;
 
         status.setText("Stopping recording...");
-        startRecording.setDisable(false);
+        startRecording.setDisable(true);
         stopRecording.setDisable(true);
 
         if (ffmpegProcess == null) {
             status.setText("No active recording process.");
+            startRecording.setDisable(false);
             return;
         }
 
@@ -401,23 +351,49 @@ public class HarmonyController {
             }
 
             if (!ffmpegProcess.isAlive()) {
-                status.setText("Recording stopped. Rendering final harmony in the background...");
+                stopLiveFeedbackStream();
+                status.setText("Recording stopped. Rendering harmonized output...");
                 runPostProcessingPipeline();
             } else {
                 status.setText("Recording stop timed out; process may still be alive.");
+                startRecording.setDisable(false);
             }
 
         } catch (Exception e) {
             status.setText("Error stopping recording.");
             e.printStackTrace();
+            startRecording.setDisable(false);
         } finally {
             try { if (ffmpegStdin != null) ffmpegStdin.close(); } catch (IOException ignored) {}
             cleanupFfmpegHandles();
         }
+    }
 
-        startRecording.setDisable(false);
-        stopRecording.setDisable(true);
+    @FXML
+    protected void saveVideoOnClick() {
+        if (harmonizedVideoPath == null || !Files.exists(harmonizedVideoPath)) {
+            status.setText("No harmonized video available to save.");
+            return;
+        }
 
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Choose directory to save harmonized video");
+
+        Window window = status.getScene() != null ? status.getScene().getWindow() : null;
+        File selectedDir = chooser.showDialog(window);
+        if (selectedDir == null) {
+            status.setText("Save cancelled.");
+            return;
+        }
+
+        try {
+            Path destination = selectedDir.toPath().resolve("harmonized_video.mp4");
+            Files.copy(harmonizedVideoPath, destination, StandardCopyOption.REPLACE_EXISTING);
+            status.setText("Saved: " + destination);
+        } catch (IOException e) {
+            status.setText("Failed to save harmonized video.");
+            e.printStackTrace();
+        }
     }
 
     private void cleanupFfmpegHandles() {
@@ -426,156 +402,86 @@ public class HarmonyController {
         ffmpegLogThread = null;
     }
 
-    public void startCamera() {
-        if (cameraRunning.get()) {
-            stopCamera();
-        }
-
-        if (!loadOpenCvLibrary()) {
-            Platform.runLater(() -> status.setText("OpenCV native library failed to load."));
-            return;
-        }
-
-        // Requirement: use VideoCapture(0) for native desktop camera capture.
-        VideoCapture capture = new VideoCapture(0);
-
-        if (!capture.isOpened()) {
-            capture.release();
-            Platform.runLater(() -> {
-                status.setText("Unable to open camera via OpenCV VideoCapture(0).");
-                previewPlaceholder.setVisible(true);
-                previewPlaceholder.setManaged(true);
-                cameraSwingNode.setVisible(false);
-                cameraSwingNode.setManaged(false);
-            });
-            return;
-        }
-
-        videoCapture = capture;
-        cameraRunning.set(true);
-
-        Platform.runLater(() -> {
-            cameraSwingNode.setVisible(true);
-            cameraSwingNode.setManaged(true);
-            previewPlaceholder.setVisible(false);
-            previewPlaceholder.setManaged(false);
-            status.setText("Session ready. Live camera preview is active.");
-        });
-
-        startSwingRepaintLoop();
-
-        captureThread = new Thread(() -> {
-            Mat frame = new Mat();
-            Mat bgrFrame = new Mat();
-
-            while (cameraRunning.get() && videoCapture != null && videoCapture.isOpened()) {
-                if (!videoCapture.read(frame) || frame.empty()) {
-                    continue;
-                }
-
-                if (frame.channels() == 1) {
-                    Imgproc.cvtColor(frame, bgrFrame, Imgproc.COLOR_GRAY2BGR);
-                } else if (frame.channels() == 4) {
-                    Imgproc.cvtColor(frame, bgrFrame, Imgproc.COLOR_BGRA2BGR);
-                } else {
-                    frame.copyTo(bgrFrame);
-                }
-
-                currentFrame = matToBufferedImage(bgrFrame);
-            }
-
-            frame.release();
-            bgrFrame.release();
-        }, "opencv-camera-capture");
-
-        captureThread.setDaemon(true);
-        captureThread.start();
+    private boolean isLiveFeedbackRunning() {
+        return cameraStreamProcess != null && cameraStreamProcess.isAlive();
     }
 
-    private void startSwingRepaintLoop() {
-        SwingUtilities.invokeLater(() -> {
-            if (repaintTimer != null && repaintTimer.isRunning()) {
-                repaintTimer.stop();
-            }
+    private boolean startLiveFeedbackStream() {
+        stopLiveFeedbackStream();
 
-            repaintTimer = new Timer(16, e -> {
-                if (cameraPanel != null) {
-                    cameraPanel.repaint();
+        List<String> command = new ArrayList<>();
+        command.add("python");
+        command.add(Path.of(AppPaths.ENGINE, "scripts", "live_gesture.py").toString());
+        command.add("--serve");
+        command.add("--host");
+        command.add("127.0.0.1");
+        command.add("--port");
+        command.add(String.valueOf(CAMERA_STREAM_PORT));
+        command.add("--camera-index");
+        command.add("0");
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        pb.redirectErrorStream(true);
+
+        try {
+            cameraStreamProcess = pb.start();
+            cameraStreamLogThread = new Thread(() -> {
+                try (BufferedReader br = new BufferedReader(
+                        new InputStreamReader(cameraStreamProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        System.out.println("[live_gesture] " + line);
+                    }
+                } catch (IOException ignored) {
                 }
-            });
-            repaintTimer.setCoalesce(true);
-            repaintTimer.start();
-        });
-    }
+            }, "live-gesture-log");
+            cameraStreamLogThread.setDaemon(true);
+            cameraStreamLogThread.start();
 
-    private BufferedImage matToBufferedImage(Mat mat) {
-        int width = mat.width();
-        int height = mat.height();
-        int channels = mat.channels();
-
-        byte[] sourcePixels = new byte[width * height * channels];
-        mat.get(0, 0, sourcePixels);
-
-        BufferedImage image = new BufferedImage(width, height, BufferedImage.TYPE_3BYTE_BGR);
-        byte[] targetPixels = ((DataBufferByte) image.getRaster().getDataBuffer()).getData();
-        System.arraycopy(sourcePixels, 0, targetPixels, 0, Math.min(sourcePixels.length, targetPixels.length));
-        return image;
-    }
-
-    private boolean loadOpenCvLibrary() {
-        if (openCvLoaded) {
-            return true;
-        }
-
-        synchronized (HarmonyController.class) {
-            if (openCvLoaded) {
-                return true;
-            }
-
-            try {
-                OpenCV.loadLocally();
-                openCvLoaded = true;
-                return true;
-            } catch (Throwable t) {
-                t.printStackTrace();
+            Thread.sleep(1000);
+            if (!cameraStreamProcess.isAlive()) {
+                status.setText("Live feedback stream exited unexpectedly.");
                 return false;
             }
+
+            String streamUrl = "http://127.0.0.1:" + CAMERA_STREAM_PORT + "/video?ts=" + System.currentTimeMillis();
+            Platform.runLater(() -> {
+                stopPreviewPlayer();
+                outputMediaView.setVisible(false);
+                outputMediaView.setManaged(false);
+                feedbackWebView.setVisible(true);
+                feedbackWebView.setManaged(true);
+                previewPlaceholder.setVisible(false);
+                previewPlaceholder.setManaged(false);
+                feedbackWebView.getEngine().load(streamUrl);
+            });
+
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            status.setText("Failed to launch Python live feedback stream.");
+            return false;
         }
     }
 
-    public void stopCamera() {
-        cameraRunning.set(false);
+    private void stopLiveFeedbackStream() {
+        Process process = cameraStreamProcess;
+        cameraStreamProcess = null;
 
-        Thread localCaptureThread = captureThread;
-        if (localCaptureThread != null && localCaptureThread.isAlive()) {
+        if (process != null) {
+            process.destroy();
             try {
-                localCaptureThread.join(300);
+                if (!process.waitFor(2, TimeUnit.SECONDS) && process.isAlive()) {
+                    process.destroyForcibly();
+                    process.waitFor(2, TimeUnit.SECONDS);
+                }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
-        captureThread = null;
 
-        VideoCapture capture = videoCapture;
-        if (capture != null) {
-            capture.release();
-        }
-        videoCapture = null;
-
-        currentFrame = null;
-
-        SwingUtilities.invokeLater(() -> {
-            if (repaintTimer != null) {
-                repaintTimer.stop();
-                repaintTimer = null;
-            }
-            if (cameraPanel != null) {
-                cameraPanel.repaint();
-            }
-        });
-    }
-
-    public void shutdown() {
+        cameraStreamLogThread = null;
+        Platform.runLater(() -> feedbackWebView.getEngine().load("about:blank"));
     }
 
     private void runPostProcessingPipeline() {
@@ -592,13 +498,23 @@ public class HarmonyController {
                 updateProcessingMessage("Composing harmonized output...");
                 new PythonRunner().runHarmonizeAudio(currentSessionPath);
 
+                updateProcessingMessage("Building harmonized video preview...");
+                Path outputVideo = muxFinalVideo(Path.of(currentSessionPath));
+                harmonizedVideoPath = outputVideo;
+
                 Platform.runLater(() -> {
                     hideProcessingOverlay();
-                    status.setText("Processing complete! Your harmonized output is ready.");
+                    showVideoPreview(outputVideo);
+                    saveVideoButton.setDisable(false);
+                    startRecording.setDisable(false);
+                    stopRecording.setDisable(true);
+                    status.setText("Processing complete! Preview the harmonized result, then save if satisfied.");
                 });
             } catch (Exception e) {
                 Platform.runLater(() -> {
                     hideProcessingOverlay();
+                    startRecording.setDisable(false);
+                    stopRecording.setDisable(true);
                     status.setText("Background processing failed. Check logs for details.");
                 });
                 e.printStackTrace();
@@ -607,6 +523,93 @@ public class HarmonyController {
 
         pipelineThread.setDaemon(true);
         pipelineThread.start();
+    }
+
+    private Path muxFinalVideo(Path sessionDir) throws IOException, InterruptedException {
+        Path inputVideo = sessionDir.resolve("video.mp4");
+        Path harmonizedAudio = sessionDir.resolve("harmonized_enhanced.wav");
+        Path finalVideo = sessionDir.resolve("harmonized_video.mp4");
+
+        ProcessBuilder pb = new ProcessBuilder(
+                "ffmpeg", "-y",
+                "-i", inputVideo.toString(),
+                "-i", harmonizedAudio.toString(),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-shortest",
+                finalVideo.toString()
+        );
+        pb.redirectErrorStream(true);
+        Process process = pb.start();
+
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                System.out.println("[ffmpeg-mux] " + line);
+            }
+        }
+
+        int exit = process.waitFor();
+        if (exit != 0 || !Files.exists(finalVideo)) {
+            throw new IOException("Failed to build harmonized video preview.");
+        }
+        return finalVideo;
+    }
+
+    private void showVideoPreview(Path videoPath) {
+        stopPreviewPlayer();
+
+        feedbackWebView.setVisible(false);
+        feedbackWebView.setManaged(false);
+        previewPlaceholder.setVisible(false);
+        previewPlaceholder.setManaged(false);
+        outputMediaView.setVisible(true);
+        outputMediaView.setManaged(true);
+
+        Media media = new Media(videoPath.toUri().toString());
+        previewMediaPlayer = new MediaPlayer(media);
+        previewMediaPlayer.setAutoPlay(true);
+        outputMediaView.setMediaPlayer(previewMediaPlayer);
+
+        previewActions.setVisible(true);
+        previewActions.setManaged(true);
+    }
+
+    private void hideVideoPreview() {
+        stopPreviewPlayer();
+        outputMediaView.setVisible(false);
+        outputMediaView.setManaged(false);
+        previewActions.setVisible(false);
+        previewActions.setManaged(false);
+    }
+
+    private void showPlaceholder(String title, String subtitle) {
+        hideVideoPreview();
+        feedbackWebView.setVisible(false);
+        feedbackWebView.setManaged(false);
+
+        if (!previewPlaceholder.getChildren().isEmpty() && previewPlaceholder.getChildren().size() >= 2) {
+            if (previewPlaceholder.getChildren().get(0) instanceof Label titleLabel) {
+                titleLabel.setText(title);
+            }
+            if (previewPlaceholder.getChildren().get(1) instanceof Label subtitleLabel) {
+                subtitleLabel.setText(subtitle);
+            }
+        }
+
+        previewPlaceholder.setVisible(true);
+        previewPlaceholder.setManaged(true);
+    }
+
+    private void stopPreviewPlayer() {
+        if (previewMediaPlayer != null) {
+            previewMediaPlayer.stop();
+            previewMediaPlayer.dispose();
+            previewMediaPlayer = null;
+        }
+        outputMediaView.setMediaPlayer(null);
     }
 
     private void showProcessingOverlay() {
@@ -625,5 +628,14 @@ public class HarmonyController {
 
     private void updateProcessingMessage(String message) {
         Platform.runLater(() -> processingMessage.setText(message));
+    }
+
+    public void shutdown() {
+        isRecording = false;
+        if (ffmpegProcess != null && ffmpegProcess.isAlive()) {
+            ffmpegProcess.destroyForcibly();
+        }
+        stopLiveFeedbackStream();
+        stopPreviewPlayer();
     }
 }
