@@ -22,7 +22,9 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -94,6 +96,8 @@ public class HarmonyController {
         new Thread(() -> {
             List<MediaDevice> videoDevices = new ArrayList<>();
             List<MediaDevice> audioDevices = new ArrayList<>();
+            Set<String> seenVideoNames = new LinkedHashSet<>();
+            Set<String> seenAudioNames = new LinkedHashSet<>();
 
             try {
                 ProcessBuilder pb = new ProcessBuilder(
@@ -117,12 +121,12 @@ public class HarmonyController {
                     System.out.println("[Device Scan] " + line);
                     String lowerLine = line.toLowerCase();
 
-                    if (lowerLine.contains("directshow video devices")) {
+                    if (lowerLine.contains("directshow video devices") || lowerLine.contains("video devices")) {
                         currentSection = SECTION_VIDEO;
                         currentDevice = null;
                         continue;
                     }
-                    if (lowerLine.contains("directshow audio devices")) {
+                    if (lowerLine.contains("directshow audio devices") || lowerLine.contains("audio devices")) {
                         currentSection = SECTION_AUDIO;
                         currentDevice = null;
                         continue;
@@ -143,22 +147,30 @@ public class HarmonyController {
                     }
 
                     if (lowerLine.contains("(video)")) {
-                        currentDevice = new MediaDevice(extractedName);
-                        videoDevices.add(currentDevice);
+                        if (seenVideoNames.add(extractedName)) {
+                            currentDevice = new MediaDevice(extractedName);
+                            videoDevices.add(currentDevice);
+                        }
                         continue;
                     }
                     if (lowerLine.contains("(audio)")) {
-                        currentDevice = new MediaDevice(extractedName);
-                        audioDevices.add(currentDevice);
+                        if (seenAudioNames.add(extractedName)) {
+                            currentDevice = new MediaDevice(extractedName);
+                            audioDevices.add(currentDevice);
+                        }
                         continue;
                     }
 
                     if (currentSection == SECTION_VIDEO) {
-                        currentDevice = new MediaDevice(extractedName);
-                        videoDevices.add(currentDevice);
+                        if (seenVideoNames.add(extractedName)) {
+                            currentDevice = new MediaDevice(extractedName);
+                            videoDevices.add(currentDevice);
+                        }
                     } else if (currentSection == SECTION_AUDIO) {
-                        currentDevice = new MediaDevice(extractedName);
-                        audioDevices.add(currentDevice);
+                        if (seenAudioNames.add(extractedName)) {
+                            currentDevice = new MediaDevice(extractedName);
+                            audioDevices.add(currentDevice);
+                        }
                     }
                 }
 
@@ -182,7 +194,7 @@ public class HarmonyController {
                     audioDeviceComboBox.getSelectionModel().selectFirst();
                 }
 
-                status.setText("Devices loaded successfully.");
+                status.setText("Devices loaded successfully. Video: " + videoDevices.size() + ", Audio: " + audioDevices.size());
             });
 
         }, "device-loader").start();
