@@ -383,49 +383,72 @@ public class HarmonyController {
         startRecording.setDisable(true);
         stopRecording.setDisable(true);
 
-        if (ffmpegProcess == null) {
+        Process process = ffmpegProcess;
+        BufferedWriter stdin = ffmpegStdin;
+        cleanupFfmpegHandles();
+
+        if (process == null) {
             status.setText("No active recording process.");
             startRecording.setDisable(false);
             return;
         }
 
+        Thread finalizeThread = new Thread(() -> finalizeRecordingAndStartPipeline(process, stdin), "recording-finalizer");
+        finalizeThread.setDaemon(true);
+        finalizeThread.start();
+    }
+
+    private void finalizeRecordingAndStartPipeline(Process process, BufferedWriter stdin) {
         try {
-            if (ffmpegProcess.isAlive() && ffmpegStdin != null) {
-                ffmpegStdin.write("q\n");
-                ffmpegStdin.flush();
+            if (process.isAlive() && stdin != null) {
+                stdin.write("q\n");
+                stdin.flush();
             }
 
-            boolean exited = ffmpegProcess.waitFor(20, TimeUnit.SECONDS);
-
-            if (!exited && ffmpegProcess.isAlive()) {
-                status.setText("Finalizing recording took too long; forcing stop...");
-                ffmpegProcess.destroyForcibly();
-                ffmpegProcess.waitFor(3, TimeUnit.SECONDS);
+            boolean exited = process.waitFor(20, TimeUnit.SECONDS);
+            if (!exited && process.isAlive()) {
+                Platform.runLater(() -> status.setText("Finalizing recording took too long; forcing stop..."));
+                process.destroyForcibly();
+                process.waitFor(3, TimeUnit.SECONDS);
             }
 
-            if (!ffmpegProcess.isAlive()) {
-                stopLiveFeedbackStream();
-                Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
-                if (!waitForRecordedVideoReady(recordedVideo)) {
+            if (process.isAlive()) {
+                Platform.runLater(() -> {
+                    status.setText("Recording stop timed out; process may still be alive.");
+                    startRecording.setDisable(false);
+                    stopRecording.setDisable(true);
+                });
+                return;
+            }
+
+            stopLiveFeedbackStream();
+            Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
+            if (!waitForRecordedVideoReady(recordedVideo)) {
+                Platform.runLater(() -> {
                     status.setText("Recording stopped, but video file is incomplete. Please record again.");
                     startRecording.setDisable(false);
-                    return;
-                }
-
-                status.setText("Recording stopped. Rendering harmonized output...");
-                runPostProcessingPipeline();
-            } else {
-                status.setText("Recording stop timed out; process may still be alive.");
-                startRecording.setDisable(false);
+                    stopRecording.setDisable(true);
+                });
+                return;
             }
 
+            Platform.runLater(() -> status.setText("Recording stopped. Rendering harmonized output..."));
+            runPostProcessingPipeline();
+
         } catch (Exception e) {
-            status.setText("Error stopping recording.");
             e.printStackTrace();
-            startRecording.setDisable(false);
+            Platform.runLater(() -> {
+                status.setText("Error stopping recording: " + e.getMessage());
+                startRecording.setDisable(false);
+                stopRecording.setDisable(true);
+            });
         } finally {
-            try { if (ffmpegStdin != null) ffmpegStdin.close(); } catch (IOException ignored) {}
-            cleanupFfmpegHandles();
+            if (stdin != null) {
+                try {
+                    stdin.close();
+                } catch (IOException ignored) {
+                }
+            }
         }
     }
 
@@ -436,20 +459,33 @@ public class HarmonyController {
         }
 
         long deadline = System.currentTimeMillis() + 15000;
+        long lastSize = -1;
+        int stableCount = 0;
+
         while (System.currentTimeMillis() < deadline) {
             if (isVideoContainerReadable(recordedVideo)) {
                 return true;
             }
 
             try {
+                long currentSize = Files.exists(recordedVideo) ? Files.size(recordedVideo) : -1;
+                if (currentSize > 64 * 1024 && currentSize == lastSize) {
+                    stableCount++;
+                    if (stableCount >= 3) {
+                        return true;
+                    }
+                } else {
+                    stableCount = 0;
+                }
+                lastSize = currentSize;
+
                 Thread.sleep(500);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+            } catch (Exception e) {
                 return false;
             }
         }
 
-        return isVideoContainerReadable(recordedVideo);
+        return isVideoContainerReadable(recordedVideo) || stableCount >= 3;
     }
 
     private boolean isVideoContainerReadable(Path recordedVideo) {
@@ -461,13 +497,26 @@ public class HarmonyController {
             return false;
         }
 
-        ProcessBuilder pb = new ProcessBuilder(
+        if (runDurationProbe(new ProcessBuilder(
                 "ffprobe",
                 "-v", "error",
                 "-show_entries", "format=duration",
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 recordedVideo.toString()
-        );
+        ))) {
+            return true;
+        }
+
+        return runDurationProbe(new ProcessBuilder(
+                "ffmpeg",
+                "-v", "error",
+                "-i", recordedVideo.toString(),
+                "-f", "null",
+                "-"
+        ));
+    }
+
+    private boolean runDurationProbe(ProcessBuilder pb) {
         pb.redirectErrorStream(true);
 
         try {
@@ -476,18 +525,26 @@ public class HarmonyController {
             try (BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
                 output = br.readLine();
             }
-            boolean exited = process.waitFor(2, TimeUnit.SECONDS);
+
+            boolean exited = process.waitFor(3, TimeUnit.SECONDS);
             if (!exited) {
                 process.destroyForcibly();
                 return false;
             }
 
-            if (process.exitValue() != 0 || output == null || output.isBlank()) {
+            if (process.exitValue() != 0) {
                 return false;
             }
 
-            double duration = Double.parseDouble(output.trim());
-            return duration > 0.0;
+            if (output == null || output.isBlank()) {
+                return true;
+            }
+
+            try {
+                return Double.parseDouble(output.trim()) > 0.0;
+            } catch (NumberFormatException ignored) {
+                return true;
+            }
         } catch (Exception ignored) {
             return false;
         }
