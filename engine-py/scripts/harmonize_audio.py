@@ -46,6 +46,22 @@ def nearest_scale_midi(midi_value: float, scale_pcs: list[int]) -> float:
     return min(candidates, key=lambda v: abs(v - midi_value)) if candidates else midi_value
 
 
+
+
+def fallback_melody_midi(seg_audio: np.ndarray, sr: int) -> float:
+    if seg_audio.size == 0:
+        return 60.0
+    stft = np.abs(librosa.stft(seg_audio, n_fft=2048, hop_length=512))
+    if stft.size == 0:
+        return 60.0
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    idx = int(np.argmax(np.mean(stft, axis=1)))
+    hz = float(freqs[idx]) if 0 <= idx < len(freqs) else 261.63
+    if hz <= 0:
+        hz = 261.63
+    return float(hz_to_midi(hz))
+
+
 def make_voice_targets(melody_midi: float, chord_pcs: list[int], voices: int) -> list[float]:
     root = chord_pcs[0]
     third = chord_pcs[1 % len(chord_pcs)]
@@ -370,6 +386,8 @@ def main() -> int:
     out_r += dry_r * lead_gain
 
     shift_cache: dict[tuple[int, int, float], np.ndarray] = {}
+    harmony_segments = 0
+    harmony_voices_written = 0
 
     for seg_idx, seg in enumerate(timeline):
         start = float(seg.get("start", 0.0))
@@ -386,10 +404,11 @@ def main() -> int:
         mask = (f0_times >= start) & (f0_times < end)
         seg_f0 = f0[mask]
         seg_f0 = seg_f0[np.isfinite(seg_f0)]
-        if seg_f0.size == 0:
-            continue
 
-        melody_midi = float(np.median([hz_to_midi(v) for v in seg_f0]))
+        if seg_f0.size == 0:
+            melody_midi = fallback_melody_midi(y[s0:s1], sr)
+        else:
+            melody_midi = float(np.median([hz_to_midi(v) for v in seg_f0]))
         tuned_midi = nearest_scale_midi(melody_midi, scale_pcs)
         tune_shift = tuned_midi - melody_midi
 
@@ -405,6 +424,7 @@ def main() -> int:
         chord_pcs = chord_pitch_classes(ctx, degree)
         voice_targets = make_voice_targets(tuned_midi, chord_pcs, voices=voices)
         harmony_count = max(1, len(voice_targets) - 1)
+        harmony_segments += 1
 
         for idx, target in enumerate(voice_targets):
             if idx == 0:
@@ -445,6 +465,22 @@ def main() -> int:
             per_voice_gain = harmony_bus_gain / harmony_count
             out_l[s0:s0 + mix_len] += v_l[:mix_len] * per_voice_gain
             out_r[s0:s0 + mix_len] += v_r[:mix_len] * per_voice_gain
+            harmony_voices_written += 1
+
+    if harmony_voices_written == 0:
+        log.warning("No harmony voices were rendered from timeline segments; applying global fallback harmonies.")
+        fallback_steps = [4.0, 7.0]
+        for idx, st in enumerate(fallback_steps):
+            shifted = pitch_shift_natural(y.astype(np.float32), sr, st, use_formant=True)
+            shifted = spectral_shape_harmony(shifted, sr)
+            pan = -0.25 if idx == 0 else 0.25
+            v_l, v_r = constant_power_pan(shifted, pan)
+            per_voice_gain = harmony_bus_gain / len(fallback_steps)
+            out_l[:len(v_l)] += v_l * per_voice_gain
+            out_r[:len(v_r)] += v_r * per_voice_gain
+        harmony_voices_written = len(fallback_steps)
+
+    log.info("Harmony render summary: segments=%d voices_written=%d", harmony_segments, harmony_voices_written)
 
     vocal_bus = np.column_stack([out_l, out_r]).astype(np.float32)
     vocal_bus = apply_basic_eq(vocal_bus, sr)
