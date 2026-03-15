@@ -324,6 +324,7 @@ public class HarmonyController {
         String primaryVideoName = selectedVideo.toString();
         String primaryAudioName = selectedAudio.toString();
 
+        notifyPythonRecordingStart();
         boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath));
 
         if (!started) {
@@ -339,6 +340,7 @@ public class HarmonyController {
         }
 
         if (!started) {
+            notifyPythonRecordingStop();
             status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
             isRecording = false;
             startRecording.setDisable(false);
@@ -475,6 +477,7 @@ public class HarmonyController {
                 return;
             }
 
+            notifyPythonRecordingStop();
             stopLiveFeedbackStream();
             Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
             if (!waitForRecordedVideoReady(recordedVideo, exitCode)) {
@@ -664,6 +667,10 @@ public class HarmonyController {
         command.add(String.valueOf(CAMERA_STREAM_PORT));
         command.add("--camera-index");
         command.add("0");
+        if (currentSessionPath != null) {
+            command.add("--session-path");
+            command.add(currentSessionPath);
+        }
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
@@ -744,6 +751,34 @@ public class HarmonyController {
         return false;
     }
 
+    private void notifyPythonRecordingStart() {
+        triggerPythonRecordingEndpoint("/record/start");
+    }
+
+    private void notifyPythonRecordingStop() {
+        triggerPythonRecordingEndpoint("/record/stop");
+    }
+
+    private void triggerPythonRecordingEndpoint(String endpoint) {
+        HttpURLConnection connection = null;
+        try {
+            URL url = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + endpoint);
+            connection = (HttpURLConnection) url.openConnection();
+            connection.setRequestMethod("POST");
+            connection.setConnectTimeout(1000);
+            connection.setReadTimeout(1000);
+            connection.setDoOutput(true);
+            connection.getOutputStream().write(new byte[0]);
+            connection.getResponseCode();
+        } catch (IOException e) {
+            System.out.println("[live_gesture] endpoint call failed " + endpoint + ": " + e.getMessage());
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
+        }
+    }
+
     private void stopLiveFeedbackStream() {
         Process process = cameraStreamProcess;
         cameraStreamProcess = null;
@@ -819,9 +854,8 @@ public class HarmonyController {
             try {
                 Path sessionDir = Path.of(currentSessionPath);
 
-                updateProcessingMessage("Creating gesture timeline (timeline.json)...");
-                new PythonRunner().runAnalyzeSession(currentSessionPath);
-                ensureFileExists(sessionDir.resolve("timeline.json"), "Timeline was not generated");
+                updateProcessingMessage("Validating real-time timeline...");
+                ensureFileExists(sessionDir.resolve("timeline.json"), "Timeline was not generated during recording");
 
                 updateProcessingMessage("Extracting clean audio for harmony blending...");
                 String extractedWav = new FfmpegUtils().extractWav(currentSessionPath);

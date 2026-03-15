@@ -1,259 +1,130 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
-from typing import List, Optional, Tuple
+from pathlib import Path
 
-import numpy as np
 import librosa
+import numpy as np
 import soundfile as sf
 
-# ----------------------------
-# Enhanced Music Theory & Configuration
-# ----------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent
+ENGINE_ROOT = SCRIPT_DIR.parent
+if str(ENGINE_ROOT) not in sys.path:
+    sys.path.insert(0, str(ENGINE_ROOT))
 
-# Configuration for the "Lush" sound
-STEREO_WIDTH = 0.85  # 0.0 (Mono) to 1.0 (Super Wide)
-MIX_WET = 0.70       # Harmony volume relative to original
-MIX_DRY = 0.80       # Original vocal volume
+from audio.mixing import constant_power_pan, safe_normalize
+from audio.pitch import estimate_pitch_contour
+from harmony.arranger import build_voice_targets, hz_to_midi
+from harmony.music_theory import MusicContext, chord_pitch_classes
+from utils.logging_utils import configure_logging
 
-KEY_TO_SEMITONE = {
-    "C": 0,  "B#": 0, "C#": 1, "Db": 1, "D": 2, "D#": 3, "Eb": 3,
-    "E": 4,  "Fb": 4, "F": 5,  "E#": 5, "F#": 6, "Gb": 6, "G": 7,
-    "G#": 8, "Ab": 8, "A": 9,  "A#": 10, "Bb": 10, "B": 11, "Cb": 11
-}
+log = configure_logging("harmonize")
 
-# Extended Chord Voicings (Relative to Root)
-# Adding 7ths and 9ths creates that modern, suspended Imogen Heap vocal pad sound.
-DEGREE_TO_INTERVALS = {
-    "I":   [0, 4, 7, 11, 14],  # Major 7/9
-    "II":  [0, 3, 7, 10, 14],  # Minor 7/9
-    "III": [0, 3, 7, 10],      # Minor 7
-    "IV":  [0, 4, 7, 11, 14],  # Major 7/9
-    "V":   [0, 4, 7, 10, 14],  # Dominant 7/9
-    "VI":  [0, 3, 7, 10, 14],  # Minor 7/9
-    "VII": [0, 3, 6, 10],      # Half-diminished 7
-}
 
-# Diatonic root offsets for Major Scale (I=0, ii=2, iii=4, IV=5, V=7, vi=9, vii=11)
-DEGREE_TO_ROOT_OFFSET = {
-    "I": 0, "II": 2, "III": 4, "IV": 5, "V": 7, "VI": 9, "VII": 11
-}
+def load_json(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(path)
+    return json.loads(path.read_text(encoding="utf-8"))
 
-# ----------------------------
-# Audio & Math Helpers
-# ----------------------------
 
-def hz_to_midi(h: float) -> float:
-    if h <= 0: return 0.0
-    return 69.0 + 12.0 * math.log2(h / 440.0)
+def choose_harmony_intervals(voice_idx: int, target_midi: float, melody_midi: float) -> tuple[float, float]:
+    steps = target_midi - melody_midi
+    if voice_idx == 0:
+        pan = 0.0
+        gain = 0.75
+    elif voice_idx in (1, 2):
+        pan = -0.4 if voice_idx == 1 else 0.4
+        gain = 0.6
+    else:
+        pan = 0.8
+        gain = 0.5
+    return steps, pan * np.sign(steps if steps != 0 else 1), gain
 
-def normalize_key_name(k: str) -> str:
-    return k.strip().replace("♯", "#").replace("♭", "b")
 
-def get_chord_pitch_classes(key_semitone: int, degree: str) -> List[int]:
-    """Generates the absolute pitch classes for a given scale degree."""
-    degree_upper = degree.strip().upper()
-    
-    # Extract base Roman numeral (ignoring min/maj suffixes for this mapping)
-    base_num = ''.join(c for c in degree_upper if c in 'IV')
-    if base_num not in DEGREE_TO_ROOT_OFFSET:
-        return [(key_semitone + 0) % 12, (key_semitone + 4) % 12, (key_semitone + 7) % 12] # Fallback to Tonic Maj
-        
-    root_offset = DEGREE_TO_ROOT_OFFSET[base_num]
-    abs_root = (key_semitone + root_offset) % 12
-    intervals = DEGREE_TO_INTERVALS.get(base_num, [0, 4, 7])
-    
-    return [(abs_root + i) % 12 for i in intervals]
-
-def build_vocoder_voicing(median_midi: float, chord_pcs: List[int]) -> List[float]:
-    """
-    Intelligently builds a spread voicing around the detected melody note.
-    Instead of just matching the closest notes, it creates a wide chord stack:
-    - Bass note (Root, 1-2 octaves down)
-    - Mid notes (3rd/5th/7th below or around melody)
-    - High notes (above melody)
-    """
-    if not chord_pcs or not np.isfinite(median_midi):
-        return []
-
-    root_pc = chord_pcs[0]
-    voicing = []
-    base_octave_c = int((median_midi // 12) * 12)
-    
-    # 1. Add deep bass root (1 octave below current octave)
-    bass_note = root_pc + (base_octave_c - 12)
-    # Prevent bass from being too sub-sonic
-    if bass_note < 36: bass_note += 12 
-    voicing.append(bass_note)
-    
-    # 2. Build middle/high harmony stack
-    for pc in chord_pcs[1:]:
-        # Find closest instance of this pitch class to the melody
-        cand1 = pc + base_octave_c
-        cand2 = pc + base_octave_c - 12
-        cand3 = pc + base_octave_c + 12
-        
-        # Pick the one closest to the melody to keep the chord tight
-        best_cand = min([cand1, cand2, cand3], key=lambda x: abs(x - median_midi))
-        
-        # Avoid duplicating the exact melody note in the harmony stack
-        if abs(best_cand - median_midi) > 0.5:
-            voicing.append(best_cand)
-
-    # 3. Add a high root or 5th for "air" (1 octave up)
-    voicing.append(chord_pcs[2 % len(chord_pcs)] + base_octave_c + 12)
-    
-    # Remove duplicates and sort
-    return sorted(list(set(voicing)))
-
-def stereo_pan(audio_mono: np.ndarray, pan: float) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Constant-power stereo panning.
-    pan: -1.0 (100% Left) to 1.0 (100% Right)
-    """
-    pan = max(-1.0, min(1.0, pan))
-    angle = (pan + 1.0) * (np.pi / 4.0)
-    left = audio_mono * math.cos(angle)
-    right = audio_mono * math.sin(angle)
-    return left, right
-
-# ----------------------------
-# Main Processing Pipeline
-# ----------------------------
-
-def main():
+def main() -> int:
     if len(sys.argv) < 2:
-        print("Usage: python harmonize_enhanced.py <session_path>")
-        sys.exit(2)
+        print("Usage: python harmonize_audio.py <session_path>")
+        return 2
 
-    session = sys.argv[1]
-    audio_path = os.path.join(session, "output.wav")
-    timeline_path = os.path.join(session, "timeline.json")
-    config_path = os.path.join(session, "config.json")
-    out_path = os.path.join(session, "harmonized_enhanced.wav")
+    session = Path(sys.argv[1])
+    input_wav = session / "output.wav"
+    timeline_path = session / "timeline.json"
+    config_path = session / "config.json"
+    out_path = session / "harmonized_enhanced.wav"
 
-    # Error handling for missing files
-    for path, name in [(audio_path, "output.wav"), (timeline_path, "timeline.json"), (config_path, "config.json")]:
-        if not os.path.exists(path):
-            print(f"Missing {name}: {path}")
-            sys.exit(1)
+    timeline = load_json(timeline_path)
+    config = load_json(config_path)
 
-    # Load Config
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-        
-    key_name = normalize_key_name(str(config.get("key", "C")))
-    key_semitone = KEY_TO_SEMITONE.get(key_name, 0)
-    user_mix = float(config.get("mix", MIX_WET))
+    if not input_wav.exists():
+        raise FileNotFoundError(input_wav)
 
-    # Load Timeline
-    with open(timeline_path, "r", encoding="utf-8") as f:
-        timeline = json.load(f)
+    y, sr = librosa.load(str(input_wav), sr=None, mono=True)
+    if y.ndim != 1:
+        y = librosa.to_mono(y)
 
-    # Load Audio
-    print(f"Loading {audio_path}...")
-    y_dry, sr = librosa.load(audio_path, sr=None, mono=True)
-    if y_dry.ndim != 1:
-        y_dry = librosa.to_mono(y_dry)
+    f0, f0_times = estimate_pitch_contour(y, sr, hop=512)
 
-    # Pitch Tracking (hop_length 512 for good time resolution)
-    print("Analyzing pitch contour (pyin)...")
-    hop = 512
-    f0_hz, _, _ = librosa.pyin(y_dry, fmin=65, fmax=1046, sr=sr, hop_length=hop)
-    f0_times = librosa.frames_to_time(np.arange(len(f0_hz)), sr=sr, hop_length=hop)
+    ctx = MusicContext(key=str(config.get("key", "C")), scale=str(config.get("scale", "major")))
+    mix = float(config.get("mix", 0.5))
+    voices = max(1, min(4, int(float(config.get("voices", 4)))))
 
-    # Stereo Output Buffers
-    out_L = np.zeros_like(y_dry)
-    out_R = np.zeros_like(y_dry)
+    out_l = np.zeros_like(y)
+    out_r = np.zeros_like(y)
 
-    # Add Dry Signal (Center Panned)
-    dry_L, dry_R = stereo_pan(y_dry, 0.0)
-    out_L += dry_L * MIX_DRY
-    out_R += dry_R * MIX_DRY
+    dry_l, dry_r = constant_power_pan(y, 0.0)
+    out_l += dry_l * 0.8
+    out_r += dry_r * 0.8
 
-    print(f"Generating Imogen Heap Style Harmony (Key: {key_name})...")
+    shift_cache: dict[tuple[int, int], np.ndarray] = {}
 
-    # Process each timeline segment
     for seg in timeline:
-        try:
-            start, end = float(seg["start"]), float(seg["end"])
-            degree = str(seg["degree"]).strip()
-        except KeyError:
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", 0.0))
+        degree = str(seg.get("degree", "I")).upper()
+        if end <= start:
             continue
 
-        if end <= start: continue
-
-        # 1. Get pitch classes for this chord
-        chord_pcs = get_chord_pitch_classes(key_semitone, degree)
-        
-        # 2. Find median pitch of the original audio in this segment
-        mask = (f0_times >= start) & (f0_times < end)
-        seg_f0 = f0_hz[mask]
-        seg_f0 = seg_f0[np.isfinite(seg_f0)]
-        
-        if seg_f0.size == 0:
-            continue # Unvoiced/Silence
-
-        median_midi = float(np.median([hz_to_midi(h) for h in seg_f0]))
-
-        # 3. Build the Voicing Stack
-        voicing_midis = build_vocoder_voicing(median_midi, chord_pcs)
-        
         s0 = max(0, int(round(start * sr)))
-        s1 = min(len(y_dry), int(round(end * sr)))
-        if s1 <= s0: continue
+        s1 = min(len(y), int(round(end * sr)))
+        if s1 <= s0:
+            continue
 
-        seg_audio = y_dry[s0:s1]
-        
-        print(f"[{start:.2f}s - {end:.2f}s] {degree} Chord. Melody: {median_midi:.1f}. Generating {len(voicing_midis)} voices...")
+        mask = (f0_times >= start) & (f0_times < end)
+        seg_f0 = f0[mask]
+        seg_f0 = seg_f0[np.isfinite(seg_f0)]
+        if seg_f0.size == 0:
+            continue
 
-        # 4. Generate each voice and pan it
-        for i, target_midi in enumerate(voicing_midis):
-            steps = target_midi - median_midi
-            
-            # Skip shifting if it's identical to melody (avoids phasing)
+        melody_midi = float(np.median([hz_to_midi(v) for v in seg_f0]))
+        pcs = chord_pitch_classes(ctx, degree)
+        voice_targets = build_voice_targets(melody_midi, pcs, voices=voices)
+
+        seg_audio = y[s0:s1]
+
+        for idx, target in enumerate(voice_targets):
+            steps, pan, gain = choose_harmony_intervals(idx, target, melody_midi)
             if abs(steps) < 0.2:
                 continue
 
-            # High-quality pitch shift (24 bins per octave reduces artifacts)
-            shifted = librosa.effects.pitch_shift(seg_audio, sr=sr, n_steps=steps, bins_per_octave=24)
-            
-            # Panning Logic:
-            # Bass is center (0.0). Other voices alternate Left/Right, wider as they get higher.
-            if i == 0: 
-                pan_val = 0.0 
-            else:
-                side = -1.0 if i % 2 != 0 else 1.0
-                spread = (i / len(voicing_midis)) * STEREO_WIDTH
-                pan_val = side * spread
-            
-            # Pan and mix
-            voice_L, voice_R = stereo_pan(shifted, pan_val)
-            
-            # Lower the volume of extreme high/low extensions slightly
-            voice_gain = user_mix * (0.8 if abs(steps) > 12 else 1.0)
-            
-            out_L[s0:s1] += voice_L * voice_gain
-            out_R[s0:s1] += voice_R * voice_gain
+            key = (s0, int(round(steps * 10)))
+            shifted = shift_cache.get(key)
+            if shifted is None:
+                shifted = librosa.effects.pitch_shift(seg_audio, sr=sr, n_steps=steps, bins_per_octave=24)
+                shift_cache[key] = shifted
 
-    # 5. Master Bus Processing (Normalization & Limiting)
-    print("Finalizing mixdown...")
-    
-    # Interleave L and R channels
-    stereo_out = np.vstack((out_L, out_R)).T
-    
-    # Soft Clipping / Peak Normalization
-    peak = np.max(np.abs(stereo_out))
-    if peak > 0.95:
-        # Normalize to -0.5 dB to prevent digital clipping
-        stereo_out = (stereo_out / peak) * 0.944  
+            v_l, v_r = constant_power_pan(shifted, float(pan))
+            out_l[s0:s1] += v_l * mix * gain
+            out_r[s0:s1] += v_r * mix * gain
 
-    # 6. Export
-    sf.write(out_path, stereo_out, sr)
-    print(f"✨ LUSH HARMONY EXPORTED TO: {out_path} ✨")
+    stereo = np.vstack((out_l, out_r)).T
+    stereo = safe_normalize(stereo, target_peak=0.95)
+    sf.write(str(out_path), stereo, sr)
+
+    log.info("Harmonized audio exported: %s", out_path)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
