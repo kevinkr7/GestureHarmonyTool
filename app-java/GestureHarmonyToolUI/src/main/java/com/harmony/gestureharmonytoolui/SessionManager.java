@@ -19,23 +19,20 @@ public class SessionManager {
 
     }
 
-    public static void writeConfig(String sessionPath, String key, String scale, int voices, double mix){
+    public static void writeConfig(String sessionPath, int voices, double mix){
         String filepath = sessionPath+"/config.json";
 
         String jsonText="{\n" +
-                "  \"key\": \"" + key + "\",\n" +
-                "  \"scale\": \"" + scale + "\",\n" +
-                "  \"voices\": \"" + voices + "\",\n" +
-                "  \"mix\": \"" + mix + "\"\n" +
+                "  \"voices\": " + voices + ",\n" +
+                "  \"mix\": " + mix + "\n" +
                 "}";
 
-
-            try(FileWriter writer = new FileWriter(filepath)){
-                writer.write(jsonText);
-                writer.flush();
-            } catch(IOException e){
-                e.printStackTrace();
-            }
+        try(FileWriter writer = new FileWriter(filepath)){
+            writer.write(jsonText);
+            writer.flush();
+        } catch(IOException e){
+            e.printStackTrace();
+        }
 
     }
 }

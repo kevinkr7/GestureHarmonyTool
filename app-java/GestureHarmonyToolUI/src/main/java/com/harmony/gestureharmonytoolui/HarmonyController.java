@@ -214,14 +214,6 @@ public class HarmonyController {
         ButtonType createButtonType = new ButtonType("Create", ButtonBar.ButtonData.OK_DONE);
         dialog.getDialogPane().getButtonTypes().addAll(createButtonType, ButtonType.CANCEL);
 
-        ComboBox<String> keyBox = new ComboBox<>();
-        keyBox.getItems().addAll("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B");
-        keyBox.getSelectionModel().select("C");
-
-        ComboBox<String> scaleBox = new ComboBox<>();
-        scaleBox.getItems().addAll("major", "minor");
-        scaleBox.getSelectionModel().select("major");
-
         Spinner<Integer> voicesSpinner = new Spinner<>(1, 8, 1);
         Spinner<Double> mixSpinner = new Spinner<>(0.0, 1.0, 0.5, 0.1);
         mixSpinner.setEditable(true);
@@ -230,22 +222,16 @@ public class HarmonyController {
         grid.setHgap(10);
         grid.setVgap(10);
 
-        grid.add(new Label("Key:"), 0, 0);
-        grid.add(keyBox, 1, 0);
-        grid.add(new Label("Scale:"), 0, 1);
-        grid.add(scaleBox, 1, 1);
-        grid.add(new Label("Voices:"), 0, 2);
-        grid.add(voicesSpinner, 1, 2);
-        grid.add(new Label("Mix:"), 0, 3);
-        grid.add(mixSpinner, 1, 3);
+        grid.add(new Label("Voices:"), 0, 0);
+        grid.add(voicesSpinner, 1, 0);
+        grid.add(new Label("Mix:"), 0, 1);
+        grid.add(mixSpinner, 1, 1);
 
         dialog.getDialogPane().setContent(grid);
 
         dialog.setResultConverter(dialogButton -> {
             if (dialogButton == createButtonType) {
                 return new SessionConfig(
-                        keyBox.getValue(),
-                        scaleBox.getValue(),
                         voicesSpinner.getValue(),
                         mixSpinner.getValue()
                 );
@@ -266,7 +252,7 @@ public class HarmonyController {
         }
 
         currentSessionPath = SessionManager.createNewSession();
-        SessionManager.writeConfig(currentSessionPath, config.key, config.scale, config.voices, config.mix);
+        SessionManager.writeConfig(currentSessionPath, config.voices, config.mix);
 
         sessionLabel.setText("Session created: " + currentSessionPath);
         startRecording.setDisable(false);

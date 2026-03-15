@@ -350,7 +350,12 @@ def main() -> int:
     config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
     log.info("Detected musical context from audio: key=%s scale=%s", ctx.key, ctx.scale)
 
-    user_mix = float(np.clip(config.get("mix", 1.0), 0.0, 1.0))
+    try:
+        user_mix = float(config.get("mix", 1.0))
+    except Exception:
+        user_mix = 1.0
+
+    user_mix = float(np.clip(user_mix, 0.0, 1.0))
     voices = max(1, min(4, int(float(config.get("voices", 4)))))
     scale_pcs = scale_pitch_classes(ctx)
 
