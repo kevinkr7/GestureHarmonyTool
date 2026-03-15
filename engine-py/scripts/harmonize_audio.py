@@ -108,15 +108,21 @@ def main() -> int:
             if abs(steps) < 0.2:
                 continue
 
-            key = (s0, int(round(steps * 10)))
+            key = (len(seg_audio), int(round(steps * 100)))
             shifted = shift_cache.get(key)
             if shifted is None:
                 shifted = librosa.effects.pitch_shift(seg_audio, sr=sr, n_steps=steps, bins_per_octave=24)
                 shift_cache[key] = shifted
 
             v_l, v_r = constant_power_pan(shifted, float(pan))
-            out_l[s0:s1] += v_l * mix * gain
-            out_r[s0:s1] += v_r * mix * gain
+
+            seg_len = s1 - s0
+            mix_len = min(seg_len, len(v_l), len(v_r))
+            if mix_len <= 0:
+                continue
+
+            out_l[s0:s0 + mix_len] += v_l[:mix_len] * mix * gain
+            out_r[s0:s0 + mix_len] += v_r[:mix_len] * mix * gain
 
     stereo = np.vstack((out_l, out_r)).T
     stereo = safe_normalize(stereo, target_peak=0.95)
