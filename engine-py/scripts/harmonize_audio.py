@@ -169,9 +169,15 @@ def synth_oscillator_voice(freq: float, length: int, sr: int, seed: int) -> np.n
     ratio = np.power(2.0, cents / 1200.0)
 
     phase = 2 * np.pi * np.cumsum((freq * ratio) / sr)
-    sig = np.sin(phase)
-    sig += 0.2 * np.sin(2 * phase + rng.uniform(0, np.pi))
-    sig += 0.08 * np.sin(3 * phase + rng.uniform(0, np.pi))
+    sig = np.zeros(length, dtype=np.float32)
+    for h in range(1, 11):
+        amp = 1.0 / h
+        rand_phase = rng.uniform(0, 2 * np.pi)
+        sig += amp * np.sin(h * phase + rand_phase).astype(np.float32)
+
+    peak = np.max(np.abs(sig))
+    if peak > 1e-8:
+        sig = sig / peak
 
     atk = max(1, int(sr * 0.02))
     rel = max(1, int(sr * 0.04))
@@ -179,6 +185,22 @@ def synth_oscillator_voice(freq: float, length: int, sr: int, seed: int) -> np.n
     env[:atk] = np.linspace(0, 1, atk)
     env[-rel:] = np.linspace(1, 0, rel)
     return (sig * env).astype(np.float32)
+
+
+def detune_freq(freq: float, cents: float) -> float:
+    return float(freq * np.power(2.0, cents / 1200.0))
+
+
+def apply_sample_delay(audio: np.ndarray, samples: int) -> np.ndarray:
+    if samples <= 0:
+        return audio
+    return np.pad(audio, (samples, 0))[:len(audio)]
+
+
+def build_choir_layer(freq: float, length: int, sr: int, seed: int, detune_cents: float, delay_ms: float) -> np.ndarray:
+    layer = synth_oscillator_voice(detune_freq(freq, detune_cents), length, sr, seed)
+    delay_samples = int(sr * max(0.0, delay_ms) / 1000.0)
+    return apply_sample_delay(layer, delay_samples)
 
 
 def transfer_spectral_envelope(vocal_seg: np.ndarray, synth_seg: np.ndarray, sr: int) -> np.ndarray:
@@ -194,12 +216,16 @@ def transfer_spectral_envelope(vocal_seg: np.ndarray, synth_seg: np.ndarray, sr:
     s_mag = np.abs(s_stft)
     s_phase = np.angle(s_stft)
 
-    env = np.maximum(np.mean(v_mag, axis=1, keepdims=True), 1e-8)
-    voiced_energy = np.maximum(np.mean(v_mag), 1e-8)
-    scaled_s = s_mag / np.maximum(np.mean(s_mag, axis=1, keepdims=True), 1e-8)
+    frames = min(v_mag.shape[1], s_mag.shape[1])
+    out_mag = np.copy(s_mag)
+    for t in range(frames):
+        env = v_mag[:, t:t + 1]
+        s_frame = s_mag[:, t:t + 1]
+        s_norm = s_frame / (np.mean(s_frame) + 1e-8)
+        out_mag[:, t:t + 1] = s_norm * env
 
-    out_mag = scaled_s * env * 0.85
-    out_mag *= np.sqrt(voiced_energy / np.maximum(np.mean(out_mag), 1e-8))
+    if s_mag.shape[1] > frames and frames > 0:
+        out_mag[:, frames:] = out_mag[:, frames - 1:frames]
 
     out_stft = out_mag * np.exp(1j * s_phase)
     return librosa.istft(out_stft, hop_length=hop, length=len(synth_seg)).astype(np.float32)
@@ -227,7 +253,8 @@ def load_ir(sr: int) -> np.ndarray:
     candidates = [ir_dir / "studio_room.wav", ir_dir / "plate_reverb.wav", ir_dir / "hall_reverb.wav"]
     existing = [p for p in candidates if p.exists()]
     if existing:
-        chosen = random.choice(existing)
+        plate = ir_dir / "plate_reverb.wav"
+        chosen = plate if plate.exists() else random.choice(existing)
         ir, _ = librosa.load(str(chosen), sr=sr, mono=False)
         if ir.ndim == 1:
             ir = np.vstack([ir, ir])
@@ -389,27 +416,26 @@ def main() -> int:
                 continue
 
             seed = (seg_idx + 1) * 1000 + idx
-            synth = synth_oscillator_voice(midi_to_hz(target), len(vocal_seg), sr, seed)
+            base_freq = midi_to_hz(target)
+            rng = random.Random(seed)
+
+            layer_a = build_choir_layer(base_freq, len(vocal_seg), sr, seed + 1, 0.0, 0.0)
+            layer_b = build_choir_layer(base_freq, len(vocal_seg), sr, seed + 2, 6.0, rng.uniform(8.0, 25.0))
+            layer_c = build_choir_layer(base_freq, len(vocal_seg), sr, seed + 3, -6.0, rng.uniform(8.0, 25.0))
+            synth = (layer_a + 0.85 * layer_b + 0.85 * layer_c).astype(np.float32)
+
             synth = transfer_spectral_envelope(vocal_seg, synth, sr)
             synth = apply_formant_shift(synth, sr, {1: 1.02, 2: 0.97, 3: 1.05}.get(idx, 1.0))
             synth = apply_voice_spectral_variation(synth, sr, idx)
             synth = apply_chorus(synth, sr)
-            synth = apply_saturation(synth, drive=random.Random(seed).uniform(1.3, 1.8))
+            synth = apply_saturation(synth, drive=rng.uniform(1.3, 1.8))
             synth *= seg_env
 
-            delay_samples = int(sr * random.Random(seed + 99).uniform(0.005, 0.035))
-            if delay_samples > 0:
-                synth = np.pad(synth, (delay_samples, 0))[: len(synth)]
-
-            if idx == 1:
-                pan = -0.35
-            elif idx == 2:
-                pan = 0.35
-            else:
-                pan = -0.65 if seg_idx % 2 == 0 else 0.65
+            pan_positions = [-0.6, -0.3, 0.3, 0.6]
+            pan = pan_positions[(idx - 1) % len(pan_positions)]
 
             v_l, v_r = constant_power_pan(synth.astype(np.float32), pan)
-            stereo_offset = int(sr * random.Random(seed + 199).uniform(0.001, 0.004))
+            stereo_offset = int(sr * rng.uniform(0.001, 0.004))
             if stereo_offset > 0:
                 if pan < 0:
                     v_r = np.pad(v_r, (stereo_offset, 0))[: len(v_r)]
@@ -438,6 +464,9 @@ def main() -> int:
             out_r[:len(v_r)] += v_r * gain
 
     vocal_bus = np.column_stack([out_l, out_r]).astype(np.float32)
+    vocal_bus[:, 0] = apply_chorus(vocal_bus[:, 0], sr, rate_hz=0.18, depth_ms=4.0, base_delay_ms=16.0)
+    vocal_bus[:, 1] = apply_chorus(vocal_bus[:, 1], sr, rate_hz=0.21, depth_ms=4.5, base_delay_ms=18.0)
+    vocal_bus = apply_saturation(vocal_bus, drive=1.18)
 
     wet_amount = 0.10 + (0.35 * reverb_intensity)
     enhanced = convolve_reverb_send(vocal_bus, sr, wet=wet_amount, pre_delay_ms=25.0)
