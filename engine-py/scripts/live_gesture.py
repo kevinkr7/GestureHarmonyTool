@@ -3,11 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-import threading
 import time
 from pathlib import Path
 
 import cv2
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENGINE_ROOT = SCRIPT_DIR.parent
@@ -21,33 +21,34 @@ from utils.logging_utils import configure_logging
 log = configure_logging("live_gesture")
 
 
-def preview_mode(session_path: Path, camera_index: int = 0) -> int:
-    stop_event = threading.Event()
+def decode_mjpeg_frames(stream) -> "tuple[np.ndarray, bool]":
+    buffer = bytearray()
+    while True:
+        chunk = stream.read(4096)
+        if not chunk:
+            break
+        buffer.extend(chunk)
 
-    def stdin_watcher() -> None:
-        try:
-            while not stop_event.is_set():
-                line = sys.stdin.readline()
-                if not line:
-                    break
-                if line.strip().lower() in {"q", "quit", "stop", "exit"}:
-                    stop_event.set()
-                    break
-        except Exception:
-            pass
+        while True:
+            start = buffer.find(b"\xff\xd8")
+            if start < 0:
+                break
+            end = buffer.find(b"\xff\xd9", start + 2)
+            if end < 0:
+                break
 
-    watcher = threading.Thread(target=stdin_watcher, daemon=True, name="preview-stdin-watcher")
-    watcher.start()
+            jpg = bytes(buffer[start:end + 2])
+            del buffer[: end + 2]
 
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_MSMF)
-    if not cap.isOpened():
-        cap.release()
-        cap = cv2.VideoCapture(camera_index)
+            arr = np.frombuffer(jpg, dtype=np.uint8)
+            frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if frame is not None:
+                yield frame, False
 
-    if not cap.isOpened():
-        log.error("Unable to open camera index %s", camera_index)
-        return 1
+    yield np.empty((0, 0, 3), dtype=np.uint8), True
 
+
+def preview_mode(session_path: Path) -> int:
     recognizer = GestureRecognizer(window_size=8)
     timeline = TimelineEngine(min_segment_s=0.3, stable_ms=200.0)
     timeline_path = session_path / "timeline.json"
@@ -59,11 +60,9 @@ def preview_mode(session_path: Path, camera_index: int = 0) -> int:
     cv2.namedWindow("Gesture Feedback", cv2.WINDOW_NORMAL)
 
     try:
-        while not stop_event.is_set():
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                time.sleep(0.01)
-                continue
+        for frame, eof in decode_mjpeg_frames(sys.stdin.buffer):
+            if eof:
+                break
 
             degree = recognizer.detect(frame)
             ts = max(0.0, time.monotonic() - start)
@@ -83,7 +82,6 @@ def preview_mode(session_path: Path, camera_index: int = 0) -> int:
         end_ts = max(0.0, time.monotonic() - start)
         timeline.write(timeline_path, end_ts)
         recognizer.close()
-        cap.release()
         cv2.destroyAllWindows()
 
     return 0
@@ -92,9 +90,8 @@ def preview_mode(session_path: Path, camera_index: int = 0) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("session_path", nargs="?", help="Session path")
-    parser.add_argument("--preview", action="store_true", help="Run OpenCV preview window")
+    parser.add_argument("--preview", action="store_true", help="Read MJPEG on stdin and show gesture window")
     parser.add_argument("--session-path", dest="session_path_opt", default=None)
-    parser.add_argument("--camera-index", type=int, default=0)
     args = parser.parse_args()
 
     session = args.session_path_opt or args.session_path
@@ -103,7 +100,7 @@ def main() -> int:
         if not session:
             print("--preview requires --session-path <path>")
             return 2
-        return preview_mode(Path(session), camera_index=args.camera_index)
+        return preview_mode(Path(session))
 
     if not session:
         print("Usage: python live_gesture.py <session_path> OR --preview --session-path <path>")

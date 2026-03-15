@@ -37,7 +37,7 @@ public class HarmonyController {
 
     private Process cameraStreamProcess;
     private Thread cameraStreamLogThread;
-    private BufferedWriter cameraStreamStdin;
+    private OutputStream cameraStreamStdin;
 
     private MediaPlayer previewMediaPlayer;
     private Path harmonizedVideoPath;
@@ -286,16 +286,16 @@ public class HarmonyController {
         }
         if (isRecording) return;
 
-        if (!isLiveFeedbackRunning() && !startLiveFeedbackStream()) {
-            status.setText("Unable to start live feedback stream.");
-            return;
-        }
-
         MediaDevice selectedVideo = videoDeviceComboBox.getValue();
         MediaDevice selectedAudio = audioDeviceComboBox.getValue();
 
         if (selectedVideo == null || selectedAudio == null) {
             status.setText("Error: Please select both a camera and a microphone.");
+            return;
+        }
+
+        if (!isLiveFeedbackRunning() && !startLiveFeedbackStream()) {
+            status.setText("Unable to start live feedback stream.");
             return;
         }
 
@@ -316,7 +316,7 @@ public class HarmonyController {
         String primaryVideoName = selectedVideo.toString();
         String primaryAudioName = selectedAudio.toString();
 
-        boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath));
+        boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath), cameraStreamStdin);
 
         if (!started) {
             String altVideo = selectedVideo.getAltName();
@@ -326,16 +326,17 @@ public class HarmonyController {
 
             if (hasAltPair) {
                 status.setText("Retrying recording with alternative device identifiers...");
-                started = startFfmpegRecording(buildRecordingCommand(altVideo, altAudio, videoPath));
+                started = startFfmpegRecording(buildRecordingCommand(altVideo, altAudio, videoPath), cameraStreamStdin);
             }
         }
 
         if (!started) {
             status.setText("Retrying recording with fallback device index (0)...");
-            started = startFfmpegRecording(buildRecordingCommand("0", "0", videoPath));
+            started = startFfmpegRecording(buildRecordingCommand("0", "0", videoPath), cameraStreamStdin);
         }
 
         if (!started) {
+            stopLiveFeedbackStream();
             status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
             isRecording = false;
             startRecording.setDisable(false);
@@ -358,23 +359,36 @@ public class HarmonyController {
         return List.of(
                 "ffmpeg",
                 "-y",
+                "-thread_queue_size", "4096",
                 "-f", "dshow",
+                "-framerate", "30",
+                "-video_size", "1280x720",
                 "-i", device,
-                "-r", "30",
+                "-map", "0:v",
+                "-map", "0:a?",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "23",
                 "-c:a", "aac",
-                videoPath
+                "-movflags", "+faststart+frag_keyframe+empty_moov",
+                videoPath,
+                "-map", "0:v",
+                "-an",
+                "-vf", "fps=30",
+                "-c:v", "mjpeg",
+                "-q:v", "5",
+                "-f", "mjpeg",
+                "pipe:1"
         );
     }
 
-    private boolean startFfmpegRecording(List<String> command) {
+
+    private boolean startFfmpegRecording(List<String> command, OutputStream previewSink) {
         cleanupFfmpegHandles();
         recentFfmpegLogs.clear();
 
         ProcessBuilder pb = new ProcessBuilder(command);
-        pb.redirectErrorStream(true);
+        pb.redirectErrorStream(false);
 
         try {
             ffmpegProcess = pb.start();
@@ -386,7 +400,7 @@ public class HarmonyController {
 
             ffmpegLogThread = new Thread(() -> {
                 try (BufferedReader br = new BufferedReader(
-                        new InputStreamReader(processRef.getInputStream(), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(processRef.getErrorStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = br.readLine()) != null) {
                         System.out.println("[ffmpeg] " + line);
@@ -402,6 +416,17 @@ public class HarmonyController {
             }, "ffmpeg-log-drain");
             ffmpegLogThread.setDaemon(true);
             ffmpegLogThread.start();
+
+            if (previewSink != null) {
+                Thread previewPipeThread = new Thread(() -> {
+                    try (InputStream in = processRef.getInputStream(); OutputStream out = previewSink) {
+                        in.transferTo(out);
+                    } catch (IOException ignored) {
+                    }
+                }, "ffmpeg-preview-pipe");
+                previewPipeThread.setDaemon(true);
+                previewPipeThread.start();
+            }
 
             long deadline = System.currentTimeMillis() + 5000;
             while (System.currentTimeMillis() < deadline) {
@@ -706,7 +731,7 @@ public class HarmonyController {
 
         try {
             cameraStreamProcess = pb.start();
-            cameraStreamStdin = new BufferedWriter(new OutputStreamWriter(cameraStreamProcess.getOutputStream(), StandardCharsets.UTF_8));
+            cameraStreamStdin = cameraStreamProcess.getOutputStream();
 
             cameraStreamLogThread = new Thread(() -> {
                 try (BufferedReader br = new BufferedReader(
@@ -743,25 +768,25 @@ public class HarmonyController {
 
     private void stopLiveFeedbackStream() {
         Process process = cameraStreamProcess;
-        BufferedWriter stdin = cameraStreamStdin;
+        OutputStream stdin = cameraStreamStdin;
         cameraStreamProcess = null;
         cameraStreamStdin = null;
 
         if (stdin != null) {
             try {
-                stdin.write("q\n");
-                stdin.flush();
                 stdin.close();
             } catch (IOException ignored) {
             }
         }
 
         if (process != null) {
-            process.destroy();
             try {
                 if (!process.waitFor(2, TimeUnit.SECONDS) && process.isAlive()) {
-                    process.destroyForcibly();
-                    process.waitFor(2, TimeUnit.SECONDS);
+                    process.destroy();
+                    if (!process.waitFor(2, TimeUnit.SECONDS) && process.isAlive()) {
+                        process.destroyForcibly();
+                        process.waitFor(2, TimeUnit.SECONDS);
+                    }
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
