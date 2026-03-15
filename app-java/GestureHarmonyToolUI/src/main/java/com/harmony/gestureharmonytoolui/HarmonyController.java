@@ -22,6 +22,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -37,6 +38,7 @@ public class HarmonyController {
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
+    private final List<String> recentFfmpegLogs = Collections.synchronizedList(new ArrayList<>());
 
     private Process cameraStreamProcess;
     private Thread cameraStreamLogThread;
@@ -319,14 +321,48 @@ public class HarmonyController {
 
         String videoPath = sessionDir.resolve("video.mp4").toString();
 
-        String videoAlt = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
-        String audioAlt = selectedAudio.getAltName() != null ? selectedAudio.getAltName() : selectedAudio.toString();
-        String device = "video=\"" + videoAlt + "\":audio=\"" + audioAlt + "\"";
+        String primaryVideoName = selectedVideo.toString();
+        String primaryAudioName = selectedAudio.toString();
 
-        ProcessBuilder pb = new ProcessBuilder(
+        boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath));
+
+        if (!started) {
+            String altVideo = selectedVideo.getAltName();
+            String altAudio = selectedAudio.getAltName();
+            boolean hasAltPair = altVideo != null && altAudio != null
+                    && (!altVideo.equals(primaryVideoName) || !altAudio.equals(primaryAudioName));
+
+            if (hasAltPair) {
+                status.setText("Retrying recording with alternative device identifiers...");
+                started = startFfmpegRecording(buildRecordingCommand(altVideo, altAudio, videoPath));
+            }
+        }
+
+        if (!started) {
+            status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
+            isRecording = false;
+            startRecording.setDisable(false);
+            stopRecording.setDisable(true);
+            return;
+        }
+
+        status.setText("Recording started. Gesture feedback is visible live.");
+
+        startRecording.setDisable(true);
+        stopRecording.setDisable(false);
+    }
+
+
+    private List<String> buildRecordingCommand(String videoDeviceName, String audioDeviceName, String videoPath) {
+        String safeVideoName = videoDeviceName.replace("\"", "\\\"");
+        String safeAudioName = audioDeviceName.replace("\"", "\\\"");
+        String device = "video=\"" + safeVideoName + "\":audio=\"" + safeAudioName + "\"";
+
+        return List.of(
                 "ffmpeg",
                 "-y",
                 "-f", "dshow",
+                "-rtbufsize", "256M",
                 "-i", device,
                 "-r", "30",
                 "-c:v", "libx264",
@@ -336,42 +372,59 @@ public class HarmonyController {
                 "-b:a", "128k",
                 videoPath
         );
+    }
 
+    private boolean startFfmpegRecording(List<String> command) {
+        cleanupFfmpegHandles();
+        recentFfmpegLogs.clear();
+
+        ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
 
         try {
             ffmpegProcess = pb.start();
+            Process processRef = ffmpegProcess;
 
             ffmpegStdin = new BufferedWriter(
-                    new OutputStreamWriter(ffmpegProcess.getOutputStream(), StandardCharsets.UTF_8)
+                    new OutputStreamWriter(processRef.getOutputStream(), StandardCharsets.UTF_8)
             );
 
             ffmpegLogThread = new Thread(() -> {
                 try (BufferedReader br = new BufferedReader(
-                        new InputStreamReader(ffmpegProcess.getInputStream(), StandardCharsets.UTF_8))) {
+                        new InputStreamReader(processRef.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = br.readLine()) != null) {
                         System.out.println("[ffmpeg] " + line);
+                        synchronized (recentFfmpegLogs) {
+                            recentFfmpegLogs.add(line);
+                            if (recentFfmpegLogs.size() > 80) {
+                                recentFfmpegLogs.remove(0);
+                            }
+                        }
                     }
-                } catch (IOException ignored) {}
+                } catch (IOException ignored) {
+                }
             }, "ffmpeg-log-drain");
             ffmpegLogThread.setDaemon(true);
             ffmpegLogThread.start();
 
-            status.setText("Recording started. Gesture feedback is visible live.");
+            Thread.sleep(1200);
+            if (!processRef.isAlive()) {
+                List<String> tail;
+                synchronized (recentFfmpegLogs) {
+                    tail = new ArrayList<>(recentFfmpegLogs);
+                }
+                System.out.println("[ffmpeg] Recording process exited early. logs=" + String.join(" | ", tail));
+                cleanupFfmpegHandles();
+                return false;
+            }
 
+            return true;
         } catch (Exception e) {
-            status.setText("Failed to start recording (ffmpeg).");
             e.printStackTrace();
             cleanupFfmpegHandles();
-            isRecording = false;
-            startRecording.setDisable(false);
-            stopRecording.setDisable(true);
-            return;
+            return false;
         }
-
-        startRecording.setDisable(true);
-        stopRecording.setDisable(false);
     }
 
     @FXML
