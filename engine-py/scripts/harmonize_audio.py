@@ -98,6 +98,61 @@ def make_voice_targets(melody_midi: float, chord_pcs: list[int], voices: int) ->
     return out
 
 
+
+
+def build_segment_envelope(length: int, sr: int, crossfade_ms: float = 30.0) -> np.ndarray:
+    if length <= 0:
+        return np.array([], dtype=np.float32)
+    fade_len = int(sr * max(0.0, crossfade_ms) / 1000.0)
+    fade_len = min(fade_len, length // 2)
+    env = np.ones(length, dtype=np.float32)
+    if fade_len > 0:
+        env[:fade_len] = np.linspace(0.0, 1.0, fade_len)
+        env[-fade_len:] = np.linspace(1.0, 0.0, fade_len)
+    return env
+
+
+def apply_formant_shift(audio: np.ndarray, sr: int, shift_factor: float) -> np.ndarray:
+    if audio.size == 0 or abs(shift_factor - 1.0) < 1e-3:
+        return audio
+    spec = librosa.stft(audio, n_fft=2048, hop_length=256)
+    mag = np.abs(spec)
+    phase = np.angle(spec)
+    bins = np.arange(mag.shape[0])
+    src = np.clip(bins / shift_factor, 0, mag.shape[0] - 1)
+    shifted_mag = np.zeros_like(mag)
+    for t in range(mag.shape[1]):
+        shifted_mag[:, t] = np.interp(bins, src, mag[:, t], left=mag[0, t], right=mag[-1, t])
+    rebuilt = shifted_mag * np.exp(1j * phase)
+    return librosa.istft(rebuilt, hop_length=256, length=len(audio)).astype(np.float32)
+
+
+def apply_voice_spectral_variation(audio: np.ndarray, sr: int, voice_idx: int) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    spec = librosa.stft(audio, n_fft=2048, hop_length=512)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    curve = np.ones_like(freqs, dtype=np.float32)
+
+    if voice_idx == 1:
+        band = (freqs >= 2500) & (freqs <= 3500)
+        curve[band] *= np.power(10.0, 2.0 / 20.0)
+    elif voice_idx == 2:
+        band = (freqs >= 4500) & (freqs <= 5500)
+        curve[band] *= np.power(10.0, -2.0 / 20.0)
+    else:
+        band = (freqs >= 7500) & (freqs <= 8500)
+        curve[band] *= np.power(10.0, 1.5 / 20.0)
+
+    spec *= curve[:, None]
+    return librosa.istft(spec, hop_length=512, length=len(audio)).astype(np.float32)
+
+
+def apply_saturation(audio: np.ndarray, drive: float = 1.5) -> np.ndarray:
+    sat = np.tanh(audio * drive)
+    return (0.7 * audio + 0.3 * sat).astype(np.float32)
+
+
 def synth_oscillator_voice(freq: float, length: int, sr: int, seed: int) -> np.ndarray:
     if length <= 0:
         return np.array([], dtype=np.float32)
