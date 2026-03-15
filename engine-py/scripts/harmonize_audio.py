@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -17,7 +16,7 @@ if str(ENGINE_ROOT) not in sys.path:
 from audio.mixing import constant_power_pan, safe_normalize
 from audio.pitch import estimate_pitch_contour
 from harmony.arranger import build_voice_targets, hz_to_midi
-from harmony.music_theory import MusicContext, chord_pitch_classes
+from harmony.music_theory import MusicContext, chord_pitch_classes, detect_music_context, scale_pitch_classes
 from utils.logging_utils import configure_logging
 
 log = configure_logging("harmonize")
@@ -27,6 +26,31 @@ def load_json(path: Path):
     if not path.exists():
         raise FileNotFoundError(path)
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+
+
+def nearest_scale_midi(midi_value: float, scale_pcs: list[int]) -> float:
+    candidates = []
+    base_oct = int(np.floor(midi_value / 12.0))
+    for octv in range(base_oct - 1, base_oct + 2):
+        for pc in scale_pcs:
+            candidates.append(octv * 12 + pc)
+    return min(candidates, key=lambda v: abs(v - midi_value)) if candidates else midi_value
+
+
+def apply_reverb_stereo(stereo: np.ndarray, sr: int, wet: float = 0.18) -> np.ndarray:
+    if stereo.size == 0:
+        return stereo
+    wet = max(0.0, min(0.5, wet))
+    delays = [int(sr * 0.03), int(sr * 0.045), int(sr * 0.06)]
+    gains = [0.35, 0.24, 0.16]
+    reverbed = np.copy(stereo)
+    for d, g in zip(delays, gains):
+        if d <= 0 or d >= len(stereo):
+            continue
+        reverbed[d:, :] += stereo[:-d, :] * g
+    return stereo * (1.0 - wet) + reverbed * wet
 
 
 def choose_harmony_intervals(voice_idx: int, target_midi: float, melody_midi: float) -> tuple[float, float]:
@@ -66,16 +90,19 @@ def main() -> int:
 
     f0, f0_times = estimate_pitch_contour(y, sr, hop=512)
 
-    ctx = MusicContext(key=str(config.get("key", "C")), scale=str(config.get("scale", "major")))
+    detected_ctx = detect_music_context(y, sr)
+    ctx = MusicContext(key=detected_ctx.key, scale=detected_ctx.scale)
+    config["detected_key"] = ctx.key
+    config["detected_scale"] = ctx.scale
+    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+    log.info("Detected musical context from audio: key=%s scale=%s", ctx.key, ctx.scale)
+
     mix = float(config.get("mix", 0.5))
     voices = max(1, min(4, int(float(config.get("voices", 4)))))
+    scale_pcs = scale_pitch_classes(ctx)
 
     out_l = np.zeros_like(y)
     out_r = np.zeros_like(y)
-
-    dry_l, dry_r = constant_power_pan(y, 0.0)
-    out_l += dry_l * 0.8
-    out_r += dry_r * 0.8
 
     shift_cache: dict[tuple[int, int], np.ndarray] = {}
 
@@ -98,13 +125,27 @@ def main() -> int:
             continue
 
         melody_midi = float(np.median([hz_to_midi(v) for v in seg_f0]))
-        pcs = chord_pitch_classes(ctx, degree)
-        voice_targets = build_voice_targets(melody_midi, pcs, voices=voices)
+        tuned_midi = nearest_scale_midi(melody_midi, scale_pcs)
+        tune_shift = tuned_midi - melody_midi
 
-        seg_audio = y[s0:s1]
+        seg_audio_raw = y[s0:s1]
+        if abs(tune_shift) >= 0.1:
+            seg_audio = librosa.effects.pitch_shift(seg_audio_raw, sr=sr, n_steps=tune_shift, bins_per_octave=24)
+        else:
+            seg_audio = seg_audio_raw
+
+        pcs = chord_pitch_classes(ctx, degree)
+        voice_targets = build_voice_targets(tuned_midi, pcs, voices=voices)
+
+        seg_len = s1 - s0
+        dry_len = min(seg_len, len(seg_audio))
+        if dry_len > 0:
+            dry_seg_l, dry_seg_r = constant_power_pan(seg_audio[:dry_len], 0.0)
+            out_l[s0:s0 + dry_len] += dry_seg_l * 0.35
+            out_r[s0:s0 + dry_len] += dry_seg_r * 0.35
 
         for idx, target in enumerate(voice_targets):
-            steps, pan, gain = choose_harmony_intervals(idx, target, melody_midi)
+            steps, pan, gain = choose_harmony_intervals(idx, target, tuned_midi)
             if abs(steps) < 0.2:
                 continue
 
@@ -116,7 +157,6 @@ def main() -> int:
 
             v_l, v_r = constant_power_pan(shifted, float(pan))
 
-            seg_len = s1 - s0
             mix_len = min(seg_len, len(v_l), len(v_r))
             if mix_len <= 0:
                 continue
@@ -125,6 +165,7 @@ def main() -> int:
             out_r[s0:s0 + mix_len] += v_r[:mix_len] * mix * gain
 
     stereo = np.vstack((out_l, out_r)).T
+    stereo = apply_reverb_stereo(stereo, sr, wet=0.18)
     stereo = safe_normalize(stereo, target_peak=0.95)
     sf.write(str(out_path), stereo, sr)
 
