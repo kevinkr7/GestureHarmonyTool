@@ -313,20 +313,19 @@ public class HarmonyController {
 
         String videoPath = sessionDir.resolve("video.mp4").toString();
 
-        String primaryVideoName = selectedVideo.toString();
-        String primaryAudioName = selectedAudio.toString();
+        String primaryVideoName = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
+        String primaryAudioName = selectedAudio.getAltName() != null ? selectedAudio.getAltName() : selectedAudio.toString();
 
         boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath), cameraStreamStdin);
 
         if (!started) {
-            String altVideo = selectedVideo.getAltName();
-            String altAudio = selectedAudio.getAltName();
-            boolean hasAltPair = altVideo != null && altAudio != null
-                    && (!altVideo.equals(primaryVideoName) || !altAudio.equals(primaryAudioName));
+            String fallbackVideo = selectedVideo.toString();
+            String fallbackAudio = selectedAudio.toString();
+            boolean hasDisplayNameFallback = !fallbackVideo.equals(primaryVideoName) || !fallbackAudio.equals(primaryAudioName);
 
-            if (hasAltPair) {
-                status.setText("Retrying recording with alternative device identifiers...");
-                started = startFfmpegRecording(buildRecordingCommand(altVideo, altAudio, videoPath), cameraStreamStdin);
+            if (hasDisplayNameFallback) {
+                status.setText("Retrying recording with device display names...");
+                started = startFfmpegRecording(buildRecordingCommand(fallbackVideo, fallbackAudio, videoPath), cameraStreamStdin);
             }
         }
 
@@ -510,8 +509,6 @@ public class HarmonyController {
             return;
         }
 
-        stopLiveFeedbackStream();
-
         Thread finalizeThread = new Thread(() -> finalizeRecordingAndStartPipeline(process, stdin), "recording-finalizer");
         finalizeThread.setDaemon(true);
         finalizeThread.start();
@@ -568,6 +565,7 @@ public class HarmonyController {
                 } catch (IOException ignored) {
                 }
             }
+            stopLiveFeedbackStream();
         }
     }
 
