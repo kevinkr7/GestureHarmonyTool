@@ -19,12 +19,13 @@ public class SessionManager {
 
     }
 
-    public static void writeConfig(String sessionPath, int voices, double mix){
+    public static void writeConfig(String sessionPath, int voices, double mix, double reverbIntensity){
         String filepath = sessionPath+"/config.json";
 
         String jsonText="{\n" +
                 "  \"voices\": " + voices + ",\n" +
-                "  \"mix\": " + mix + "\n" +
+                "  \"mix\": " + mix + ",\n" +
+                "  \"reverb_intensity\": " + reverbIntensity + "\n" +
                 "}";
 
         try(FileWriter writer = new FileWriter(filepath)){

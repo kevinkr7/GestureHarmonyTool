@@ -324,6 +324,25 @@ def stereo_widen(stereo: np.ndarray, width_gain: float = 1.12) -> np.ndarray:
     return np.column_stack([l, r]).astype(np.float32)
 
 
+
+
+def match_input_loudness(stereo: np.ndarray, reference_mono: np.ndarray) -> np.ndarray:
+    if stereo.size == 0 or reference_mono.size == 0:
+        return stereo
+    ref_rms = float(np.sqrt(np.mean(np.square(reference_mono)) + 1e-12))
+    out_mono = np.mean(stereo, axis=1)
+    out_rms = float(np.sqrt(np.mean(np.square(out_mono)) + 1e-12))
+    if out_rms <= 1e-9:
+        return stereo
+    gain = ref_rms / out_rms
+    return stereo * gain
+
+
+def antares_pitch_correction(seg_audio_raw: np.ndarray, seg_audio_tuned: np.ndarray, strength: float = 0.82) -> np.ndarray:
+    strength = float(np.clip(strength, 0.0, 1.0))
+    return (seg_audio_raw * (1.0 - strength) + seg_audio_tuned * strength).astype(np.float32)
+
+
 def normalize_lufs_approx(stereo: np.ndarray, target_lufs: float = -14.0) -> np.ndarray:
     if stereo.size == 0:
         return stereo
@@ -372,8 +391,16 @@ def main() -> int:
         user_mix = 1.0
 
     user_mix = float(np.clip(user_mix, 0.0, 1.0))
+
+    try:
+        reverb_intensity = float(config.get("reverb_intensity", 0.35))
+    except Exception:
+        reverb_intensity = 0.35
+    reverb_intensity = float(np.clip(reverb_intensity, 0.0, 1.0))
+
     voices = max(1, min(4, int(float(config.get("voices", 4)))))
     scale_pcs = scale_pitch_classes(ctx)
+    log.info("Render parameters: voices=%d mix=%.2f reverb_intensity=%.2f", voices, user_mix, reverb_intensity)
 
     lead_gain = 0.7
     harmony_bus_gain = 0.3 * user_mix
@@ -414,7 +441,8 @@ def main() -> int:
 
         seg_audio_raw = y[s0:s1].astype(np.float32)
         if abs(tune_shift) >= 0.1:
-            seg_audio = pitch_shift_natural(seg_audio_raw, sr, tune_shift, use_formant=True)
+            tuned_seg = pitch_shift_natural(seg_audio_raw, sr, tune_shift, use_formant=True)
+            seg_audio = antares_pitch_correction(seg_audio_raw, tuned_seg, strength=0.82)
         else:
             seg_audio = seg_audio_raw
 
@@ -487,9 +515,12 @@ def main() -> int:
     vocal_bus = apply_deesser(vocal_bus, sr, reduction_db=4.5)
     vocal_bus = apply_rms_compressor(vocal_bus, sr, threshold_db=-18.0, ratio=2.0, attack_ms=5.0, release_ms=80.0)
 
-    enhanced = convolve_reverb_send(vocal_bus, sr, wet=0.18)
+    wet_amount = 0.08 + (0.32 * reverb_intensity)
+    enhanced = convolve_reverb_send(vocal_bus, sr, wet=wet_amount)
     enhanced = stereo_widen(enhanced, width_gain=1.12)
     enhanced = apply_limiter(enhanced, sr, threshold_db=-1.0, attack_ms=1.0, release_ms=50.0)
+    enhanced = match_input_loudness(enhanced, y.astype(np.float32))
+    enhanced = 0.82 * enhanced + 0.18 * np.column_stack([y, y]).astype(np.float32)
     enhanced = safe_normalize(enhanced, target_peak=np.power(10.0, -1.0 / 20.0))
     sf.write(str(out_path), enhanced, sr)
 

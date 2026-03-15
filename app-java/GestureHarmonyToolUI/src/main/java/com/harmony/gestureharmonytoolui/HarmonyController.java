@@ -3,6 +3,7 @@ package com.harmony.gestureharmonytoolui;
 import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.scene.control.*;
+import javafx.scene.control.Slider;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
@@ -217,6 +218,12 @@ public class HarmonyController {
         Spinner<Integer> voicesSpinner = new Spinner<>(1, 8, 1);
         Spinner<Double> mixSpinner = new Spinner<>(0.0, 1.0, 0.5, 0.1);
         mixSpinner.setEditable(true);
+        Slider reverbSlider = new Slider(0.0, 1.0, 0.35);
+        reverbSlider.setShowTickLabels(true);
+        reverbSlider.setShowTickMarks(true);
+        reverbSlider.setMajorTickUnit(0.25);
+        reverbSlider.setMinorTickCount(4);
+        reverbSlider.setBlockIncrement(0.05);
 
         GridPane grid = new GridPane();
         grid.setHgap(10);
@@ -226,6 +233,8 @@ public class HarmonyController {
         grid.add(voicesSpinner, 1, 0);
         grid.add(new Label("Mix:"), 0, 1);
         grid.add(mixSpinner, 1, 1);
+        grid.add(new Label("Magical Reverb:"), 0, 2);
+        grid.add(reverbSlider, 1, 2);
 
         dialog.getDialogPane().setContent(grid);
 
@@ -233,7 +242,8 @@ public class HarmonyController {
             if (dialogButton == createButtonType) {
                 return new SessionConfig(
                         voicesSpinner.getValue(),
-                        mixSpinner.getValue()
+                        mixSpinner.getValue(),
+                        reverbSlider.getValue()
                 );
             }
             return null;
@@ -252,7 +262,7 @@ public class HarmonyController {
         }
 
         currentSessionPath = SessionManager.createNewSession();
-        SessionManager.writeConfig(currentSessionPath, config.voices, config.mix);
+        SessionManager.writeConfig(currentSessionPath, config.voices, config.mix, config.reverbIntensity);
 
         sessionLabel.setText("Session created: " + currentSessionPath);
         startRecording.setDisable(false);
