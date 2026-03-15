@@ -98,6 +98,28 @@ def make_voice_targets(melody_midi: float, chord_pcs: list[int], voices: int) ->
     return out
 
 
+def inversion_from_gesture_label(label: str) -> int:
+    token = str(label or "ROOT").strip().upper()
+    if token in {"FIRST_INV", "FIRST", "1ST", "I6"}:
+        return 1
+    if token in {"THIRD_INV", "THIRD", "3RD", "SECOND_INV", "SECOND", "2ND", "I64"}:
+        # Triads only have root/1st/2nd inversion; treat requested third inversion
+        # as the upper inversion slot for a three-note chord.
+        return 2
+    return 0
+
+
+def apply_triad_inversion(chord_pcs: list[int], inversion: int) -> list[int]:
+    if not chord_pcs:
+        return chord_pcs
+    inversion = max(0, min(2, int(inversion)))
+    inv = list(chord_pcs)
+    for _ in range(inversion):
+        note = inv.pop(0)
+        inv.append(note)
+    return inv
+
+
 
 
 def build_segment_envelope(length: int, sr: int, crossfade_ms: float = 30.0) -> np.ndarray:
@@ -367,8 +389,10 @@ def main() -> int:
     voices = max(1, min(4, int(float(config.get("voices", 4)))))
     scale_pcs = scale_pitch_classes(ctx)
 
-    lead_gain = 0.60
-    harmony_bus_gain = 0.40 * user_mix
+    # Keep the lead vocal prominent and close to recorded level, then surround it
+    # with harmonies underneath.
+    lead_gain = 1.00
+    harmony_bus_gain = 0.32 * user_mix
 
     out_l = np.zeros_like(y, dtype=np.float32)
     out_r = np.zeros_like(y, dtype=np.float32)
@@ -382,7 +406,7 @@ def main() -> int:
     for seg_idx, seg in enumerate(timeline):
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", 0.0))
-        degree = str(seg.get("degree", "I")).upper()
+        inversion_label = str(seg.get("degree", "ROOT")).upper()
         if end <= start:
             continue
 
@@ -405,7 +429,8 @@ def main() -> int:
             melody_midi = float(np.median([hz_to_midi(v) for v in seg_f0]))
 
         tuned_midi = nearest_scale_midi(melody_midi, scale_pcs)
-        chord_pcs = chord_pitch_classes(ctx, degree)
+        chord_pcs = chord_pitch_classes(ctx, "I")
+        chord_pcs = apply_triad_inversion(chord_pcs, inversion_from_gesture_label(inversion_label))
         voice_targets = make_voice_targets(tuned_midi, chord_pcs, voices=voices)
         harmony_count = max(1, len(voice_targets) - 1)
 

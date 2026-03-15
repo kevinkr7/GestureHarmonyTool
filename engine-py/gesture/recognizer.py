@@ -63,17 +63,19 @@ class GestureRecognizer:
         }
 
     def _map_gesture(self, states: dict[str, bool]) -> str:
-        total = sum(states.values())
-        thumb_index = states["thumb"] and states["index"] and not states["middle"] and not states["ring"] and not states["pinky"]
+        # Restrict gesture control to chord inversion selection only.
+        # Root position: only index finger up.
+        root = states["index"] and not states["middle"] and not states["ring"] and not states["pinky"]
+        # First inversion: index + middle fingers up.
+        first_inv = states["index"] and states["middle"] and not states["ring"] and not states["pinky"]
+        # Third-requested inversion mode (implemented as second inversion for triads):
+        # index + middle + ring fingers up.
+        third_inv = states["index"] and states["middle"] and states["ring"] and not states["pinky"]
 
-        if total == 0:
-            return "MUTE"
-        if thumb_index:
-            return "VII"
-        return {
-            1: "I",
-            2: "II",
-            3: "IV",
-            4: "V",
-            5: "VI",
-        }.get(total, "I")
+        if root:
+            return "ROOT"
+        if first_inv:
+            return "FIRST_INV"
+        if third_inv:
+            return "THIRD_INV"
+        return "ROOT"

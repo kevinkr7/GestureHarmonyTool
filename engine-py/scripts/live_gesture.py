@@ -69,7 +69,7 @@ def preview_mode(session_path: Path) -> int:
             timeline.update(degree, ts)
 
             cv2.rectangle(frame, (20, 20), (420, 110), (0, 0, 0), -1)
-            cv2.putText(frame, f"Chord: {degree}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            cv2.putText(frame, f"Inversion: {degree}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
             cv2.imshow("Gesture Feedback", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -109,7 +109,7 @@ def main() -> int:
     out = Path(session) / "timeline.json"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps([{"start": 0.0, "end": 1.0, "degree": "I"}], indent=2), encoding="utf-8")
+        out.write_text(json.dumps([{"start": 0.0, "end": 1.0, "degree": "ROOT"}], indent=2), encoding="utf-8")
     return 0
 
 
