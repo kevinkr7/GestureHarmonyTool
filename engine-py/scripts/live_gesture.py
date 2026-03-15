@@ -33,14 +33,7 @@ _timeline_engine = TimelineEngine(min_segment_s=0.3, stable_ms=200.0)
 _recording_active = False
 _recording_start_monotonic: float | None = None
 _session_path: Path | None = None
-
-
-def open_camera(camera_index: int):
-    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-    if cap.isOpened():
-        return cap
-    cap.release()
-    return cv2.VideoCapture(camera_index)
+_input_stream_url: str | None = None
 
 
 def encode_status_frame(message: str) -> bytes:
@@ -86,45 +79,51 @@ def finalize_timeline() -> list[dict]:
     return timeline
 
 
-def camera_capture_loop(camera_index: int):
-    recognizer = GestureRecognizer(window_size=8)
-    cap = open_camera(camera_index)
+def open_input_stream(stream_url: str):
+    cap = cv2.VideoCapture(stream_url)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    return cap
 
-    if not cap.isOpened():
-        set_latest_frame(encode_status_frame("Camera unavailable"))
-        while not _stream_stop_event.is_set():
-            time.sleep(0.2)
-        recognizer.close()
-        return
+
+def stream_capture_loop(stream_url: str):
+    recognizer = GestureRecognizer(window_size=8)
 
     try:
         while not _stream_stop_event.is_set():
-            ok, frame = cap.read()
-            if not ok:
-                time.sleep(0.01)
+            cap = open_input_stream(stream_url)
+            if not cap.isOpened():
+                set_latest_frame(encode_status_frame("Waiting for FFmpeg stream..."))
+                time.sleep(0.3)
                 continue
 
-            degree = recognizer.detect(frame)
-            update_timeline_realtime(degree)
+            try:
+                while not _stream_stop_event.is_set():
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        set_latest_frame(encode_status_frame("Stream disconnected. Reconnecting..."))
+                        break
 
-            cv2.rectangle(frame, (20, 20), (420, 110), (0, 0, 0), -1)
-            cv2.putText(frame, f"Chord: {degree}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+                    degree = recognizer.detect(frame)
+                    update_timeline_realtime(degree)
 
-            ret, buffer = cv2.imencode('.jpg', frame)
-            if ret:
-                set_latest_frame(buffer.tobytes())
+                    cv2.rectangle(frame, (20, 20), (440, 110), (0, 0, 0), -1)
+                    cv2.putText(frame, f"Chord: {degree}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+
+                    ret, buffer = cv2.imencode('.jpg', frame)
+                    if ret:
+                        set_latest_frame(buffer.tobytes())
+            finally:
+                cap.release()
     finally:
-        cap.release()
         recognizer.close()
 
 
-def ensure_stream_worker(camera_index: int):
+def ensure_stream_worker(stream_url: str):
     global _stream_thread
     if _stream_thread and _stream_thread.is_alive():
         return
     _stream_stop_event.clear()
-    _stream_thread = threading.Thread(target=camera_capture_loop, args=(camera_index,), daemon=True, name="gesture-camera")
+    _stream_thread = threading.Thread(target=stream_capture_loop, args=(stream_url,), daemon=True, name="gesture-stream")
     _stream_thread.start()
 
 
@@ -138,7 +137,7 @@ def generate_frames():
 
 @app.route('/health')
 def health():
-    return {"status": "ok", "recording": _recording_active}
+    return {"status": "ok", "recording": _recording_active, "stream_url": _input_stream_url}
 
 
 @app.route('/frame')
@@ -181,15 +180,15 @@ def timeline():
 
 
 def main() -> int:
-    global _session_path
+    global _session_path, _input_stream_url
 
     parser = argparse.ArgumentParser()
     parser.add_argument("session_path", nargs="?", help="legacy offline analysis path")
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--session-path", dest="serve_session_path", default=None)
+    parser.add_argument("--stream-url", default="http://127.0.0.1:8090/stream.mjpg")
     args = parser.parse_args()
 
     if args.serve:
@@ -197,7 +196,9 @@ def main() -> int:
         if chosen_session:
             _session_path = Path(chosen_session)
             _session_path.mkdir(parents=True, exist_ok=True)
-        ensure_stream_worker(args.camera_index)
+
+        _input_stream_url = args.stream_url
+        ensure_stream_worker(args.stream_url)
         app.run(host=args.host, port=args.port, threaded=True)
         return 0
 
@@ -205,7 +206,6 @@ def main() -> int:
         print("Usage: python live_gesture.py <session_path> OR --serve")
         return 2
 
-    # legacy no-op analysis path (timeline is now real-time)
     session = Path(args.session_path)
     out = session / "timeline.json"
     if not out.exists():

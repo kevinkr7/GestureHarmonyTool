@@ -43,6 +43,7 @@ public class HarmonyController {
     private Process cameraStreamProcess;
     private Thread cameraStreamLogThread;
     private static final int CAMERA_STREAM_PORT = 5051;
+    private static final int FFMPEG_STREAM_PORT = 8090;
 
     private MediaPlayer previewMediaPlayer;
     private ScheduledExecutorService feedbackFramePoller;
@@ -340,6 +341,11 @@ public class HarmonyController {
         }
 
         if (!started) {
+            status.setText("Retrying recording with fallback device index (0)...");
+            started = startFfmpegRecording(buildRecordingCommand("0", "0", videoPath));
+        }
+
+        if (!started) {
             notifyPythonRecordingStop();
             status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
             isRecording = false;
@@ -360,19 +366,28 @@ public class HarmonyController {
         String safeAudioName = audioDeviceName.replace("\"", "\\\"");
         String device = "video=\"" + safeVideoName + "\":audio=\"" + safeAudioName + "\"";
 
+        String teeTarget = "[select='v:a':f=mp4]" + videoPath
+                + "|[select='v':f=mjpeg]http://127.0.0.1:" + FFMPEG_STREAM_PORT + "/stream.mjpg?listen=1";
+
         return List.of(
                 "ffmpeg",
                 "-y",
+                "-thread_queue_size", "4096",
                 "-f", "dshow",
+                "-framerate", "30",
+                "-video_size", "1280x720",
                 "-rtbufsize", "256M",
                 "-i", device,
-                "-r", "30",
+                "-map", "0:v",
+                "-map", "0:a?",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "23",
                 "-c:a", "aac",
                 "-b:a", "128k",
-                videoPath
+                "-movflags", "+faststart+frag_keyframe+empty_moov",
+                "-f", "tee",
+                teeTarget
         );
     }
 
@@ -399,7 +414,7 @@ public class HarmonyController {
                         System.out.println("[ffmpeg] " + line);
                         synchronized (recentFfmpegLogs) {
                             recentFfmpegLogs.add(line);
-                            if (recentFfmpegLogs.size() > 80) {
+                            if (recentFfmpegLogs.size() > 120) {
                                 recentFfmpegLogs.remove(0);
                             }
                         }
@@ -410,22 +425,66 @@ public class HarmonyController {
             ffmpegLogThread.setDaemon(true);
             ffmpegLogThread.start();
 
-            Thread.sleep(1200);
-            if (!processRef.isAlive()) {
-                List<String> tail;
-                synchronized (recentFfmpegLogs) {
-                    tail = new ArrayList<>(recentFfmpegLogs);
+            long deadline = System.currentTimeMillis() + 5000;
+            while (System.currentTimeMillis() < deadline) {
+                if (!processRef.isAlive()) {
+                    break;
                 }
+                if (containsFfmpegFrameProgress()) {
+                    return true;
+                }
+                Thread.sleep(150);
+            }
+
+            if (!processRef.isAlive()) {
+                List<String> tail = snapshotFfmpegLogs();
                 System.out.println("[ffmpeg] Recording process exited early. logs=" + String.join(" | ", tail));
+                reportFfmpegStartupError(tail);
                 cleanupFfmpegHandles();
                 return false;
             }
 
-            return true;
+            reportFfmpegStartupError(snapshotFfmpegLogs());
+            cleanupFfmpegHandles();
+            return false;
         } catch (Exception e) {
             e.printStackTrace();
             cleanupFfmpegHandles();
             return false;
+        }
+    }
+
+
+    private boolean containsFfmpegFrameProgress() {
+        synchronized (recentFfmpegLogs) {
+            for (String line : recentFfmpegLogs) {
+                if (line.contains("frame=") && !line.contains("frame=    0")) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private List<String> snapshotFfmpegLogs() {
+        synchronized (recentFfmpegLogs) {
+            return new ArrayList<>(recentFfmpegLogs);
+        }
+    }
+
+    private void reportFfmpegStartupError(List<String> logs) {
+        String joined = String.join(" | ", logs).toLowerCase();
+        if (joined.contains("device or resource busy") || joined.contains("resource busy")) {
+            status.setText("Recording failed: camera/microphone is busy in another app.");
+            return;
+        }
+        if (joined.contains("could not find") || joined.contains("no such device") || joined.contains("not found")) {
+            status.setText("Recording failed: selected camera/microphone device not found.");
+            return;
+        }
+        if (joined.contains("invalid argument") || joined.contains("invalid data found")) {
+            status.setText("Recording failed: invalid device identifier or ffmpeg input format.");
+            return;
         }
     }
 
@@ -671,6 +730,8 @@ public class HarmonyController {
             command.add("--session-path");
             command.add(currentSessionPath);
         }
+        command.add("--stream-url");
+        command.add("http://127.0.0.1:" + FFMPEG_STREAM_PORT + "/stream.mjpg");
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
