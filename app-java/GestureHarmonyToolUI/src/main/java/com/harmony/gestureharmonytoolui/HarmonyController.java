@@ -6,7 +6,6 @@ import javafx.scene.control.*;
 import javafx.scene.layout.GridPane;
 import javafx.scene.layout.HBox;
 import javafx.scene.layout.VBox;
-import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
@@ -15,8 +14,6 @@ import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
 import java.io.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -27,8 +24,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 public class HarmonyController {
@@ -42,11 +37,9 @@ public class HarmonyController {
 
     private Process cameraStreamProcess;
     private Thread cameraStreamLogThread;
-    private static final int CAMERA_STREAM_PORT = 5051;
-    private static final int FFMPEG_STREAM_PORT = 8090;
+    private BufferedWriter cameraStreamStdin;
 
     private MediaPlayer previewMediaPlayer;
-    private ScheduledExecutorService feedbackFramePoller;
     private Path harmonizedVideoPath;
 
     @FXML private Label sessionLabel;
@@ -91,7 +84,7 @@ public class HarmonyController {
     public void initialize() {
         loadHardwareDevices();
         hideProcessingOverlay();
-        showPlaceholder("Live camera preview will appear here", "Click Create Session to start real-time gesture feedback.");
+        showPlaceholder("Camera preview opens when recording starts", "Click Start Recording to launch the gesture feedback window.");
     }
 
     private void loadHardwareDevices() {
@@ -281,10 +274,8 @@ public class HarmonyController {
         saveVideoButton.setDisable(true);
 
         hideVideoPreview();
-        boolean streamStarted = startLiveFeedbackStream();
-        if (streamStarted) {
-            status.setText("Session ready. Real-time gesture feedback is active.");
-        }
+        showPlaceholder("Camera preview opens when recording starts", "Click Start Recording to launch the gesture feedback window.");
+        status.setText("Session ready. Click Start Recording to begin preview + capture.");
     }
 
     @FXML
@@ -325,7 +316,6 @@ public class HarmonyController {
         String primaryVideoName = selectedVideo.toString();
         String primaryAudioName = selectedAudio.toString();
 
-        notifyPythonRecordingStart();
         boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath));
 
         if (!started) {
@@ -346,7 +336,6 @@ public class HarmonyController {
         }
 
         if (!started) {
-            notifyPythonRecordingStop();
             status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
             isRecording = false;
             startRecording.setDisable(false);
@@ -366,28 +355,17 @@ public class HarmonyController {
         String safeAudioName = audioDeviceName.replace("\"", "\\\"");
         String device = "video=\"" + safeVideoName + "\":audio=\"" + safeAudioName + "\"";
 
-        String teeTarget = "[select='v:a':f=mp4]" + videoPath
-                + "|[select='v':f=mjpeg]http://127.0.0.1:" + FFMPEG_STREAM_PORT + "/stream.mjpg?listen=1";
-
         return List.of(
                 "ffmpeg",
                 "-y",
-                "-thread_queue_size", "4096",
                 "-f", "dshow",
-                "-framerate", "30",
-                "-video_size", "1280x720",
-                "-rtbufsize", "256M",
                 "-i", device,
-                "-map", "0:v",
-                "-map", "0:a?",
+                "-r", "30",
                 "-c:v", "libx264",
                 "-preset", "veryfast",
                 "-crf", "23",
                 "-c:a", "aac",
-                "-b:a", "128k",
-                "-movflags", "+faststart+frag_keyframe+empty_moov",
-                "-f", "tee",
-                teeTarget
+                videoPath
         );
     }
 
@@ -507,6 +485,8 @@ public class HarmonyController {
             return;
         }
 
+        stopLiveFeedbackStream();
+
         Thread finalizeThread = new Thread(() -> finalizeRecordingAndStartPipeline(process, stdin), "recording-finalizer");
         finalizeThread.setDaemon(true);
         finalizeThread.start();
@@ -536,8 +516,6 @@ public class HarmonyController {
                 return;
             }
 
-            notifyPythonRecordingStop();
-            stopLiveFeedbackStream();
             Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
             if (!waitForRecordedVideoReady(recordedVideo, exitCode)) {
                 Platform.runLater(() -> {
@@ -719,25 +697,17 @@ public class HarmonyController {
         List<String> command = new ArrayList<>();
         command.add("python");
         command.add(Path.of(AppPaths.ENGINE, "scripts", "live_gesture.py").toString());
-        command.add("--serve");
-        command.add("--host");
-        command.add("127.0.0.1");
-        command.add("--port");
-        command.add(String.valueOf(CAMERA_STREAM_PORT));
-        command.add("--camera-index");
-        command.add("0");
-        if (currentSessionPath != null) {
-            command.add("--session-path");
-            command.add(currentSessionPath);
-        }
-        command.add("--stream-url");
-        command.add("http://127.0.0.1:" + FFMPEG_STREAM_PORT + "/stream.mjpg");
+        command.add("--preview");
+        command.add("--session-path");
+        command.add(currentSessionPath);
 
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.redirectErrorStream(true);
 
         try {
             cameraStreamProcess = pb.start();
+            cameraStreamStdin = new BufferedWriter(new OutputStreamWriter(cameraStreamProcess.getOutputStream(), StandardCharsets.UTF_8));
+
             cameraStreamLogThread = new Thread(() -> {
                 try (BufferedReader br = new BufferedReader(
                         new InputStreamReader(cameraStreamProcess.getInputStream(), StandardCharsets.UTF_8))) {
@@ -751,98 +721,40 @@ public class HarmonyController {
             cameraStreamLogThread.setDaemon(true);
             cameraStreamLogThread.start();
 
-            if (!waitForLiveFeedbackEndpoint()) {
-                status.setText("Live feedback stream did not become ready.");
+            Thread.sleep(800);
+            if (!cameraStreamProcess.isAlive()) {
+                status.setText("Failed to launch preview window.");
                 return false;
             }
 
             Platform.runLater(() -> {
-                stopPreviewPlayer();
-                outputMediaView.setVisible(false);
-                outputMediaView.setManaged(false);
-                feedbackImageView.setVisible(true);
-                feedbackImageView.setManaged(true);
-                previewPlaceholder.setVisible(false);
-                previewPlaceholder.setManaged(false);
+                feedbackImageView.setVisible(false);
+                feedbackImageView.setManaged(false);
+                previewPlaceholder.setVisible(true);
+                previewPlaceholder.setManaged(true);
             });
-
-            startFeedbackFramePolling();
             return true;
         } catch (Exception e) {
             e.printStackTrace();
-            status.setText("Failed to launch Python live feedback stream.");
+            status.setText("Failed to launch Python preview process.");
             return false;
-        }
-    }
-
-
-    private boolean waitForLiveFeedbackEndpoint() {
-        long deadline = System.currentTimeMillis() + 8000;
-
-        while (System.currentTimeMillis() < deadline) {
-            if (cameraStreamProcess == null || !cameraStreamProcess.isAlive()) {
-                return false;
-            }
-
-            HttpURLConnection connection = null;
-            try {
-                URL url = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + "/health");
-                connection = (HttpURLConnection) url.openConnection();
-                connection.setConnectTimeout(500);
-                connection.setReadTimeout(500);
-                int code = connection.getResponseCode();
-                if (code == 200) {
-                    return true;
-                }
-            } catch (IOException ignored) {
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-
-            try {
-                Thread.sleep(250);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                return false;
-            }
-        }
-
-        return false;
-    }
-
-    private void notifyPythonRecordingStart() {
-        triggerPythonRecordingEndpoint("/record/start");
-    }
-
-    private void notifyPythonRecordingStop() {
-        triggerPythonRecordingEndpoint("/record/stop");
-    }
-
-    private void triggerPythonRecordingEndpoint(String endpoint) {
-        HttpURLConnection connection = null;
-        try {
-            URL url = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + endpoint);
-            connection = (HttpURLConnection) url.openConnection();
-            connection.setRequestMethod("POST");
-            connection.setConnectTimeout(1000);
-            connection.setReadTimeout(1000);
-            connection.setDoOutput(true);
-            connection.getOutputStream().write(new byte[0]);
-            connection.getResponseCode();
-        } catch (IOException e) {
-            System.out.println("[live_gesture] endpoint call failed " + endpoint + ": " + e.getMessage());
-        } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
         }
     }
 
     private void stopLiveFeedbackStream() {
         Process process = cameraStreamProcess;
+        BufferedWriter stdin = cameraStreamStdin;
         cameraStreamProcess = null;
+        cameraStreamStdin = null;
+
+        if (stdin != null) {
+            try {
+                stdin.write("q\n");
+                stdin.flush();
+                stdin.close();
+            } catch (IOException ignored) {
+            }
+        }
 
         if (process != null) {
             process.destroy();
@@ -857,55 +769,7 @@ public class HarmonyController {
         }
 
         cameraStreamLogThread = null;
-        stopFeedbackFramePolling();
         Platform.runLater(() -> feedbackImageView.setImage(null));
-    }
-
-
-    private void startFeedbackFramePolling() {
-        stopFeedbackFramePolling();
-
-        feedbackFramePoller = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread thread = new Thread(r, "feedback-frame-poller");
-            thread.setDaemon(true);
-            return thread;
-        });
-
-        feedbackFramePoller.scheduleAtFixedRate(() -> {
-            Process streamProcess = cameraStreamProcess;
-            if (streamProcess == null || !streamProcess.isAlive()) {
-                return;
-            }
-
-            HttpURLConnection connection = null;
-            try {
-                URL frameUrl = new URL("http://127.0.0.1:" + CAMERA_STREAM_PORT + "/frame?ts=" + System.nanoTime());
-                connection = (HttpURLConnection) frameUrl.openConnection();
-                connection.setConnectTimeout(600);
-                connection.setReadTimeout(1200);
-                connection.setUseCaches(false);
-
-                try (InputStream inputStream = connection.getInputStream()) {
-                    Image frameImage = new Image(inputStream);
-                    if (!frameImage.isError()) {
-                        Platform.runLater(() -> feedbackImageView.setImage(frameImage));
-                    }
-                }
-            } catch (IOException ignored) {
-            } finally {
-                if (connection != null) {
-                    connection.disconnect();
-                }
-            }
-        }, 0, 120, TimeUnit.MILLISECONDS);
-    }
-
-    private void stopFeedbackFramePolling() {
-        ScheduledExecutorService poller = feedbackFramePoller;
-        feedbackFramePoller = null;
-        if (poller != null) {
-            poller.shutdownNow();
-        }
     }
 
     private void runPostProcessingPipeline() {
