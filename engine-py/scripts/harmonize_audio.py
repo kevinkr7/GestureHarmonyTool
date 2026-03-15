@@ -46,8 +46,6 @@ def nearest_scale_midi(midi_value: float, scale_pcs: list[int]) -> float:
     return min(candidates, key=lambda v: abs(v - midi_value)) if candidates else midi_value
 
 
-
-
 def fallback_melody_midi(seg_audio: np.ndarray, sr: int) -> float:
     if seg_audio.size == 0:
         return 60.0
@@ -141,6 +139,46 @@ def pitch_shift_natural(audio: np.ndarray, sr: int, steps: float, use_formant: b
     return pitch_shift_with_world(audio, sr, steps)
 
 
+def apply_formant_shift(audio: np.ndarray, sr: int, shift_factor: float) -> np.ndarray:
+    if audio.size == 0 or abs(shift_factor - 1.0) < 1e-3:
+        return audio
+    spec = librosa.stft(audio, n_fft=2048, hop_length=256)
+    mag = np.abs(spec)
+    phase = np.angle(spec)
+    bins = np.arange(mag.shape[0])
+    src = np.clip(bins / shift_factor, 0, mag.shape[0] - 1)
+    shifted_mag = np.zeros_like(mag)
+    for t in range(mag.shape[1]):
+        shifted_mag[:, t] = np.interp(bins, src, mag[:, t], left=mag[0, t], right=mag[-1, t])
+    rebuilt = shifted_mag * np.exp(1j * phase)
+    return librosa.istft(rebuilt, hop_length=256, length=len(audio)).astype(np.float32)
+
+
+def apply_vibrato(audio: np.ndarray, sr: int, rate_hz: float, depth_cents: float) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    n = len(audio)
+    t = np.arange(n) / sr
+    depth_samples = (np.power(2.0, depth_cents / 1200.0) - 1.0) * (sr / (2 * np.pi * max(rate_hz, 0.1)))
+    mod = depth_samples * np.sin(2 * np.pi * rate_hz * t)
+    idx = np.arange(n) + mod
+    idx = np.clip(idx, 0, n - 1)
+    return np.interp(np.arange(n), idx, audio).astype(np.float32)
+
+
+def apply_pitch_drift(audio: np.ndarray, sr: int, depth_cents: float = 8.0, rate_hz: float = 0.2) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    n = len(audio)
+    t = np.arange(n) / sr
+    cents = depth_cents * np.sin(2 * np.pi * rate_hz * t)
+    ratio = np.power(2.0, cents / 1200.0)
+    phase = np.cumsum(ratio)
+    phase = (phase - phase[0])
+    phase = phase / max(phase[-1], 1.0) * (n - 1)
+    return np.interp(np.arange(n), phase, audio).astype(np.float32)
+
+
 def apply_chorus(audio: np.ndarray, sr: int, rate_hz: float = 0.2, depth_ms: float = 5.0, base_delay_ms: float = 20.0) -> np.ndarray:
     if audio.size == 0:
         return audio
@@ -157,6 +195,32 @@ def apply_chorus(audio: np.ndarray, sr: int, rate_hz: float = 0.2, depth_ms: flo
     for i in range(base + depth, len(audio)):
         out[i] += 0.35 * audio[i - delays[i]]
     return out
+
+
+def apply_saturation(audio: np.ndarray, drive: float = 1.5) -> np.ndarray:
+    sat = np.tanh(audio * drive)
+    return (0.7 * audio + 0.3 * sat).astype(np.float32)
+
+
+def apply_voice_spectral_variation(audio: np.ndarray, sr: int, voice_idx: int) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    spec = librosa.stft(audio, n_fft=2048, hop_length=512)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    curve = np.ones_like(freqs, dtype=np.float32)
+
+    if voice_idx == 1:
+        band = (freqs >= 2500) & (freqs <= 3500)
+        curve[band] *= np.power(10.0, 2.0 / 20.0)
+    elif voice_idx == 2:
+        band = (freqs >= 4500) & (freqs <= 5500)
+        curve[band] *= np.power(10.0, -2.0 / 20.0)
+    else:
+        band = (freqs >= 7500) & (freqs <= 8500)
+        curve[band] *= np.power(10.0, 1.5 / 20.0)
+
+    spec *= curve[:, None]
+    return librosa.istft(spec, hop_length=512, length=len(audio)).astype(np.float32)
 
 
 def spectral_shape_harmony(audio: np.ndarray, sr: int) -> np.ndarray:
@@ -192,20 +256,33 @@ def load_ir(sr: int) -> np.ndarray:
     return np.vstack([left, right]).astype(np.float32)
 
 
-def convolve_reverb_send(stereo: np.ndarray, sr: int, wet: float = 0.18) -> np.ndarray:
-    wet = max(0.0, min(0.5, wet))
+def convolve_reverb_send(stereo: np.ndarray, sr: int, wet: float = 0.18, pre_delay_ms: float = 25.0) -> np.ndarray:
+    wet = max(0.0, min(0.6, wet))
     ir = load_ir(sr)
+
+    predelay = int(sr * pre_delay_ms / 1000.0)
+    delayed = np.pad(stereo, ((predelay, 0), (0, 0)))[:len(stereo)] if predelay > 0 else stereo
+
+    # Early reflections
+    er_delays = [int(sr * d) for d in (0.012, 0.019, 0.027)]
+    er_gains = [0.35, 0.22, 0.14]
+    early = np.zeros_like(delayed)
+    for d, g in zip(er_delays, er_gains):
+        if d <= 0 or d >= len(delayed):
+            continue
+        early[d:, :] += delayed[:-d, :] * g
 
     scipy_signal = optional_module("scipy.signal")
     if scipy_signal is not None:
-        rev_l = scipy_signal.fftconvolve(stereo[:, 0], ir[0], mode="full")[: len(stereo)]
-        rev_r = scipy_signal.fftconvolve(stereo[:, 1], ir[1], mode="full")[: len(stereo)]
+        rev_l = scipy_signal.fftconvolve(delayed[:, 0], ir[0], mode="full")[: len(delayed)]
+        rev_r = scipy_signal.fftconvolve(delayed[:, 1], ir[1], mode="full")[: len(delayed)]
     else:
-        rev_l = np.convolve(stereo[:, 0], ir[0], mode="full")[: len(stereo)]
-        rev_r = np.convolve(stereo[:, 1], ir[1], mode="full")[: len(stereo)]
+        rev_l = np.convolve(delayed[:, 0], ir[0], mode="full")[: len(delayed)]
+        rev_r = np.convolve(delayed[:, 1], ir[1], mode="full")[: len(delayed)]
 
-    reverbed = np.column_stack([rev_l, rev_r]).astype(np.float32)
-    return stereo + (reverbed * wet)
+    tail = np.column_stack([rev_l, rev_r]).astype(np.float32)
+    wet_sig = early + tail
+    return stereo + wet_sig * wet
 
 
 def soft_knee_gain_db(level_db: float, threshold_db: float, ratio: float, knee_db: float = 6.0) -> float:
@@ -216,7 +293,6 @@ def soft_knee_gain_db(level_db: float, threshold_db: float, ratio: float, knee_d
     if level_db > upper:
         compressed_db = threshold_db + (level_db - threshold_db) / ratio
         return compressed_db - level_db
-    x = (level_db - lower) / knee_db
     compressed_db = level_db + (1.0 / ratio - 1.0) * ((level_db - lower) ** 2) / (2.0 * knee_db)
     return compressed_db - level_db
 
@@ -324,25 +400,6 @@ def stereo_widen(stereo: np.ndarray, width_gain: float = 1.12) -> np.ndarray:
     return np.column_stack([l, r]).astype(np.float32)
 
 
-
-
-def match_input_loudness(stereo: np.ndarray, reference_mono: np.ndarray) -> np.ndarray:
-    if stereo.size == 0 or reference_mono.size == 0:
-        return stereo
-    ref_rms = float(np.sqrt(np.mean(np.square(reference_mono)) + 1e-12))
-    out_mono = np.mean(stereo, axis=1)
-    out_rms = float(np.sqrt(np.mean(np.square(out_mono)) + 1e-12))
-    if out_rms <= 1e-9:
-        return stereo
-    gain = ref_rms / out_rms
-    return stereo * gain
-
-
-def antares_pitch_correction(seg_audio_raw: np.ndarray, seg_audio_tuned: np.ndarray, strength: float = 0.82) -> np.ndarray:
-    strength = float(np.clip(strength, 0.0, 1.0))
-    return (seg_audio_raw * (1.0 - strength) + seg_audio_tuned * strength).astype(np.float32)
-
-
 def normalize_lufs_approx(stereo: np.ndarray, target_lufs: float = -14.0) -> np.ndarray:
     if stereo.size == 0:
         return stereo
@@ -352,6 +409,10 @@ def normalize_lufs_approx(stereo: np.ndarray, target_lufs: float = -14.0) -> np.
     gain_db = target_lufs - current_db
     gain = 10.0 ** (gain_db / 20.0)
     return stereo * gain
+
+
+def apply_bus_saturation(stereo: np.ndarray, drive: float = 1.15) -> np.ndarray:
+    return np.tanh(stereo * drive).astype(np.float32)
 
 
 def main() -> int:
@@ -402,8 +463,8 @@ def main() -> int:
     scale_pcs = scale_pitch_classes(ctx)
     log.info("Render parameters: voices=%d mix=%.2f reverb_intensity=%.2f", voices, user_mix, reverb_intensity)
 
-    lead_gain = 0.7
-    harmony_bus_gain = 0.3 * user_mix
+    lead_gain = 0.60
+    harmony_bus_gain = 0.40 * user_mix
 
     out_l = np.zeros_like(y, dtype=np.float32)
     out_r = np.zeros_like(y, dtype=np.float32)
@@ -415,6 +476,8 @@ def main() -> int:
     shift_cache: dict[tuple[int, int, float], np.ndarray] = {}
     harmony_segments = 0
     harmony_voices_written = 0
+
+    formant_factors = {1: 1.02, 2: 0.97, 3: 1.05}
 
     for seg_idx, seg in enumerate(timeline):
         start = float(seg.get("start", 0.0))
@@ -442,7 +505,7 @@ def main() -> int:
         seg_audio_raw = y[s0:s1].astype(np.float32)
         if abs(tune_shift) >= 0.1:
             tuned_seg = pitch_shift_natural(seg_audio_raw, sr, tune_shift, use_formant=True)
-            seg_audio = antares_pitch_correction(seg_audio_raw, tuned_seg, strength=0.82)
+            seg_audio = (0.2 * seg_audio_raw + 0.8 * tuned_seg).astype(np.float32)
         else:
             seg_audio = seg_audio_raw
 
@@ -460,7 +523,7 @@ def main() -> int:
 
             rng = random.Random((seg_idx + 1) * 1000 + idx)
             detune = rng.uniform(-0.08, 0.08)
-            delay_samples = int(sr * rng.uniform(0.01, 0.04))
+            delay_samples = int(sr * rng.uniform(0.005, 0.035))
 
             steps = (target - tuned_midi) + detune
             if abs(steps) < 0.1:
@@ -472,19 +535,32 @@ def main() -> int:
                 shifted = pitch_shift_natural(seg_audio, sr, steps, use_formant=True)
                 shift_cache[cache_key] = shifted
 
+            shifted = apply_formant_shift(shifted, sr, formant_factors.get(idx, 1.0))
+            shifted = apply_vibrato(shifted, sr, rate_hz=rng.uniform(4.5, 6.5), depth_cents=rng.uniform(14.0, 20.0))
+            shifted = apply_pitch_drift(shifted, sr, depth_cents=8.0, rate_hz=0.2)
             shifted = spectral_shape_harmony(shifted, sr)
+            shifted = apply_voice_spectral_variation(shifted, sr, idx)
             shifted = apply_chorus(shifted, sr, rate_hz=0.2, depth_ms=5.0, base_delay_ms=20.0)
+            shifted = apply_saturation(shifted, drive=rng.uniform(1.3, 1.8))
+
             if delay_samples > 0:
                 shifted = np.pad(shifted, (delay_samples, 0))[: len(seg_audio)]
 
             if idx == 1:
-                pan = -0.3
+                pan = -0.35
             elif idx == 2:
-                pan = 0.3
+                pan = 0.35
             else:
-                pan = 0.6
+                pan = -0.65 if (seg_idx % 2 == 0) else 0.65
 
             v_l, v_r = constant_power_pan(shifted.astype(np.float32), pan)
+            stereo_offset = int(sr * rng.uniform(0.001, 0.004))
+            if stereo_offset > 0:
+                if pan < 0:
+                    v_r = np.pad(v_r, (stereo_offset, 0))[: len(v_r)]
+                else:
+                    v_l = np.pad(v_l, (stereo_offset, 0))[: len(v_l)]
+
             seg_len = s1 - s0
             mix_len = min(seg_len, len(v_l), len(v_r))
             if mix_len <= 0:
@@ -500,8 +576,9 @@ def main() -> int:
         fallback_steps = [4.0, 7.0]
         for idx, st in enumerate(fallback_steps):
             shifted = pitch_shift_natural(y.astype(np.float32), sr, st, use_formant=True)
-            shifted = spectral_shape_harmony(shifted, sr)
-            pan = -0.25 if idx == 0 else 0.25
+            shifted = apply_formant_shift(shifted, sr, 1.02 if idx == 0 else 0.97)
+            shifted = apply_saturation(shifted, drive=1.5)
+            pan = -0.35 if idx == 0 else 0.35
             v_l, v_r = constant_power_pan(shifted, pan)
             per_voice_gain = harmony_bus_gain / len(fallback_steps)
             out_l[:len(v_l)] += v_l * per_voice_gain
@@ -515,17 +592,18 @@ def main() -> int:
     vocal_bus = apply_deesser(vocal_bus, sr, reduction_db=4.5)
     vocal_bus = apply_rms_compressor(vocal_bus, sr, threshold_db=-18.0, ratio=2.0, attack_ms=5.0, release_ms=80.0)
 
-    wet_amount = 0.08 + (0.32 * reverb_intensity)
-    enhanced = convolve_reverb_send(vocal_bus, sr, wet=wet_amount)
-    enhanced = stereo_widen(enhanced, width_gain=1.12)
+    wet_amount = 0.10 + (0.35 * reverb_intensity)
+    enhanced = convolve_reverb_send(vocal_bus, sr, wet=wet_amount, pre_delay_ms=25.0)
+    enhanced = stereo_widen(enhanced, width_gain=1.15)
     enhanced = apply_limiter(enhanced, sr, threshold_db=-1.0, attack_ms=1.0, release_ms=50.0)
-    enhanced = match_input_loudness(enhanced, y.astype(np.float32))
-    enhanced = 0.82 * enhanced + 0.18 * np.column_stack([y, y]).astype(np.float32)
+    enhanced = apply_bus_saturation(enhanced, drive=1.15)
+    enhanced = normalize_lufs_approx(enhanced, target_lufs=-14.0)
     enhanced = safe_normalize(enhanced, target_peak=np.power(10.0, -1.0 / 20.0))
     sf.write(str(out_path), enhanced, sr)
 
     mastered = normalize_lufs_approx(enhanced, target_lufs=-14.0)
     mastered = apply_limiter(mastered, sr, threshold_db=-1.0, attack_ms=1.0, release_ms=50.0)
+    mastered = apply_bus_saturation(mastered, drive=1.15)
     mastered = safe_normalize(mastered, target_peak=np.power(10.0, -1.0 / 20.0))
     sf.write(str(mastered_out_path), mastered, sr)
 
