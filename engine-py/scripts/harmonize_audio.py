@@ -201,6 +201,17 @@ def presence_boost(audio: np.ndarray, sr: int, gain_db: float = 3.0, center_hz: 
     return librosa.istft(spec, hop_length=512, length=len(audio)).astype(np.float32)
 
 
+def apply_high_shelf(audio: np.ndarray, sr: int, cutoff: float = 8000.0, gain_db: float = 4.0) -> np.ndarray:
+    if audio.size == 0:
+        return audio
+    spec = librosa.stft(audio, n_fft=2048, hop_length=512)
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=2048)
+    curve = np.ones_like(freqs, dtype=np.float32)
+    curve[freqs >= cutoff] *= np.power(10.0, gain_db / 20.0)
+    spec *= curve[:, None]
+    return librosa.istft(spec, hop_length=512, length=len(audio)).astype(np.float32)
+
+
 def build_ducking_envelope(lead: np.ndarray, sr: int, hop: int = 512) -> np.ndarray:
     if lead.size == 0:
         return lead
@@ -208,7 +219,7 @@ def build_ducking_envelope(lead: np.ndarray, sr: int, hop: int = 512) -> np.ndar
     if rms.size == 0:
         return np.ones_like(lead, dtype=np.float32)
     norm = rms / (np.max(rms) + 1e-8)
-    frame_gain = 1.0 - 0.40 * norm
+    frame_gain = 1.0 - 0.15 * norm
     times = librosa.frames_to_time(np.arange(len(frame_gain)), sr=sr, hop_length=hop)
     sample_t = np.arange(len(lead)) / float(sr)
     env = np.interp(sample_t, times, frame_gain, left=frame_gain[0], right=frame_gain[-1])
@@ -224,6 +235,7 @@ def synth_oscillator_voice(freq: float, length: int, sr: int, seed: int) -> np.n
     if length <= 0:
         return np.array([], dtype=np.float32)
     rng = random.Random(seed)
+    np_rng = np.random.default_rng(seed)
     t = np.arange(length) / sr
 
     vibr_rate = rng.uniform(4.5, 6.5)
@@ -245,6 +257,14 @@ def synth_oscillator_voice(freq: float, length: int, sr: int, seed: int) -> np.n
     peak = np.max(np.abs(sig))
     if peak > 1e-8:
         sig = sig / peak
+
+    noise = np_rng.normal(0.0, 1.0, size=length).astype(np.float32)
+    noise = highpass(noise, sr, cutoff=3000.0)
+    noise_peak = np.max(np.abs(noise))
+    if noise_peak > 1e-8:
+        noise = noise / noise_peak
+
+    sig = (0.85 * sig + 0.15 * noise).astype(np.float32)
 
     atk = max(1, int(sr * 0.02))
     rel = max(1, int(sr * 0.04))
@@ -437,7 +457,7 @@ def main() -> int:
     # Keep the lead vocal prominent and close to recorded level, then surround it
     # with harmonies underneath.
     lead_gain = 1.00
-    harmony_bus_gain = 0.22 * user_mix
+    harmony_bus_gain = 0.45 * user_mix
 
     out_l = np.zeros_like(y, dtype=np.float32)
     out_r = np.zeros_like(y, dtype=np.float32)
@@ -446,6 +466,7 @@ def main() -> int:
 
     lead_mono = y.astype(np.float32) * lead_gain
     lead_mono = presence_boost(lead_mono, sr, gain_db=3.0, center_hz=4000.0, width_hz=900.0)
+    lead_mono = apply_high_shelf(lead_mono, sr, cutoff=8000.0, gain_db=4.0)
     duck_env = build_ducking_envelope(lead_mono, sr)
 
     dry_l, dry_r = constant_power_pan(lead_mono, 0.0)
@@ -504,7 +525,7 @@ def main() -> int:
             synth = apply_formant_shift(synth, sr, {1: 1.02, 2: 0.97, 3: 1.05}.get(idx, 1.0))
             synth = apply_voice_spectral_variation(synth, sr, idx)
             synth = apply_chorus(synth, sr)
-            synth = apply_saturation(synth, drive=rng.uniform(1.3, 1.8))
+            synth = apply_saturation(synth, drive=rng.uniform(1.05, 1.15))
             synth = highpass(synth, sr, cutoff=150.0)
             synth = reduce_mud(synth, sr)
             synth *= seg_env
@@ -544,14 +565,14 @@ def main() -> int:
             choir_r[:len(v_r)] += v_r * gain * duck
 
     choir_bus = np.column_stack([choir_l, choir_r]).astype(np.float32)
-    choir_bus[:, 0] = apply_chorus(choir_bus[:, 0], sr, rate_hz=0.18, depth_ms=4.0, base_delay_ms=16.0)
-    choir_bus[:, 1] = apply_chorus(choir_bus[:, 1], sr, rate_hz=0.21, depth_ms=4.5, base_delay_ms=18.0)
+    choir_bus[:, 0] = apply_chorus(choir_bus[:, 0], sr, rate_hz=0.5, depth_ms=1.5, base_delay_ms=3.0)
+    choir_bus[:, 1] = apply_chorus(choir_bus[:, 1], sr, rate_hz=0.5, depth_ms=1.5, base_delay_ms=3.0)
     choir_bus = apply_saturation(choir_bus, drive=1.18)
 
     lead_bus = np.column_stack([out_l, out_r]).astype(np.float32)
 
-    lead_wet = 0.10 * (0.5 + 0.5 * reverb_intensity)
-    choir_wet = 0.35 * (0.5 + 0.5 * reverb_intensity)
+    lead_wet = 0.02
+    choir_wet = 0.10
     enhanced = convolve_reverb_send(lead_bus, sr, wet=lead_wet, pre_delay_ms=25.0) + convolve_reverb_send(choir_bus, sr, wet=choir_wet, pre_delay_ms=25.0)
     enhanced = apply_limiter(enhanced, sr, threshold_db=-1.0)
     enhanced = apply_bus_saturation(enhanced, drive=1.15)
