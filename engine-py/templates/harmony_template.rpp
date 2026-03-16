@@ -1,0 +1,31 @@
+<REAPER_PROJECT 0.1 "7.0/x64" 1710000000
+  RIPPLE 0
+  GROUPOVERRIDE 0 0 0
+  AUTOXFADE 129
+  TEMPO 120 4 4
+  <TRACK
+    NAME "Input Vocal"
+    <ITEM
+      POSITION 0
+      LENGTH 60
+      FILE "input_vocal.wav"
+    >
+  >
+  <TRACK
+    NAME "Gesture MIDI"
+    <ITEM
+      POSITION 0
+      LENGTH 60
+      FILE "chords.mid"
+    >
+    MIDIOUT 1
+  >
+  <TRACK
+    NAME "Harmony Engine"
+    ; Insert your harmony VST (e.g., Antares Harmony Engine) on this track.
+    ; Routing expected:
+    ; - Audio from Track 1 -> Track 3
+    ; - MIDI from Track 2 -> Track 3
+    ; Render target: harmonized.wav in this templates directory.
+  >
+>

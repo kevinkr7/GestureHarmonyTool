@@ -1,0 +1,6 @@
+librosa
+numpy
+soundfile
+opencv-python
+mediapipe
+pretty_midi
