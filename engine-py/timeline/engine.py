@@ -41,15 +41,23 @@ class TimelineEngine:
         self.pending_degree = None
 
     def finalize(self, end_ts: float) -> list[dict]:
-        self._close_current(end_ts)
-        merged = []
-        for seg in self.segments:
-            if seg.end - seg.start < self.min_segment_s:
+        merged: list[dict] = []
+        for seg in self._iter_all_segments(end_ts):
+            start = round(seg.start, 3)
+            end = round(seg.end, 3)
+            if end - start < self.min_segment_s:
                 continue
-            if merged and merged[-1]["degree"] == seg.degree and abs(merged[-1]["end"] - seg.start) < 0.05:
-                merged[-1]["end"] = round(seg.end, 3)
+
+            if merged and merged[-1]["degree"] == seg.degree and abs(merged[-1]["end"] - start) < 0.05:
+                merged[-1]["end"] = end
                 continue
-            merged.append({"start": round(seg.start, 3), "end": round(seg.end, 3), "degree": seg.degree})
+
+            if merged and start < merged[-1]["end"]:
+                start = merged[-1]["end"]
+                if end - start < self.min_segment_s:
+                    continue
+
+            merged.append({"start": start, "end": end, "degree": seg.degree})
 
         if not merged:
             merged = [{"start": 0.0, "end": max(0.5, round(end_ts, 3)), "degree": "ROOT"}]
@@ -65,3 +73,17 @@ class TimelineEngine:
         if ts <= self.current_start:
             return
         self.segments.append(Segment(self.current_start, ts, self.current_degree))
+
+    def _iter_all_segments(self, end_ts: float) -> list[Segment]:
+        timeline: list[Segment] = []
+        for seg in self.segments:
+            if seg.start >= end_ts:
+                continue
+            timeline.append(Segment(seg.start, min(seg.end, end_ts), seg.degree))
+
+        effective_end = max(end_ts, self.current_start)
+        if effective_end > self.current_start and self.current_start < end_ts:
+            timeline.append(Segment(self.current_start, end_ts, self.current_degree))
+
+        timeline.sort(key=lambda seg: (seg.start, seg.end))
+        return timeline

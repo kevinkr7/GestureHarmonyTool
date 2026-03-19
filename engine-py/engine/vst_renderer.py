@@ -29,6 +29,43 @@ INVERSION_TO_NOTES = {
 }
 
 
+def normalize_timeline_segments(raw_timeline, min_duration: float = 0.05) -> list[dict]:
+    cleaned = []
+    for seg in raw_timeline:
+        start = float(seg.get("start", 0.0))
+        end = float(seg.get("end", start))
+        degree = str(seg.get("degree", "ROOT")).upper()
+
+        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
+            degree = "MUTE"
+        if end <= start:
+            continue
+
+        cleaned.append({"start": start, "end": end, "degree": degree})
+
+    cleaned.sort(key=lambda seg: (seg["start"], seg["end"], seg["degree"]))
+
+    normalized = []
+    for seg in cleaned:
+        start = seg["start"]
+        end = seg["end"]
+
+        if normalized:
+            previous = normalized[-1]
+            if start < previous["end"]:
+                start = previous["end"]
+            if seg["degree"] == previous["degree"] and start <= previous["end"] + 1e-6:
+                previous["end"] = max(previous["end"], end)
+                continue
+
+        if end - start < min_duration:
+            continue
+
+        normalized.append({"start": start, "end": end, "degree": seg["degree"]})
+
+    return normalized
+
+
 def _load_plugin_config() -> dict:
     if not PLUGIN_CONFIG_PATH.exists():
         return {"vst_name": "Harmony Engine", "reaper_path": "reaper"}
@@ -65,53 +102,24 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
     with Path(timeline_path).open("r", encoding="utf-8") as f:
         raw_timeline = json.load(f)
 
-    if not raw_timeline:
+    blocks = normalize_timeline_segments(raw_timeline)
+    if not blocks:
         raise RuntimeError("Timeline is empty")
 
-    # 1. Parse your specific JSON format into solid blocks
-    blocks = []
-    current_block = None
-
-    for seg in raw_timeline:
-        start = float(seg.get("start", 0.0))
-        end = float(seg.get("end", start))
-        degree = str(seg.get("degree", "ROOT")).upper()
-
-        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
-            degree = "MUTE"
-
-        # If it's the first segment, start a block
-        if current_block is None:
-            current_block = {"start": start, "end": end, "degree": degree}
-        
-        # If the start time and chord are the same, just update the end time (holding the chord)
-        elif start == current_block["start"] and degree == current_block["degree"]:
-            current_block["end"] = end
-            
-        # If the start time or chord changes, save the finished block and start a new one
-        else:
-            blocks.append(current_block)
-            current_block = {"start": start, "end": end, "degree": degree}
-
-    # Save the very last block when the loop finishes
-    if current_block is not None:
-        blocks.append(current_block)
-
-    # 2. Write those solid blocks to the MIDI file
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
     root = 48  # C3
-    legato_overlap = 0.05  # 50ms overlap to prevent VST audio clipping
 
     for block in blocks:
         if block["degree"] != "MUTE":
             intervals = INVERSION_TO_NOTES.get(block["degree"], INVERSION_TO_NOTES["ROOT"])
+            note_end = max(block["start"] + 0.01, block["end"])
             for interval in intervals:
                 note = pretty_midi.Note(
                     velocity=96,
                     pitch=root + interval,
                     start=block["start"],
-                    end=block["end"] + legato_overlap,
+                    end=note_end,
                 )
                 instrument.notes.append(note)
 
