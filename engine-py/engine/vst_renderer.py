@@ -11,8 +11,8 @@ ENGINE_ROOT = SCRIPT_DIR.parent
 
 PLUGIN_CONFIG_PATH = ENGINE_ROOT / "config" / "plugin_config.json"
 TEMPLATE_PATH = ENGINE_ROOT / "templates" / "harmony_template.rpp"
-TEMPLATE_VOCAL = ENGINE_ROOT / "templates" / "input_vocal.wav"
-TEMPLATE_MIDI = ENGINE_ROOT / "templates" / "chords.mid"
+TEMPLATE_VOCAL = ENGINE_ROOT / "templates" / "Media" / "input_vocal-imported.wav"
+TEMPLATE_MIDI = ENGINE_ROOT / "templates" / "Media" / "chords.mid"
 TEMPLATE_RENDERED = ENGINE_ROOT / "templates" / "harmonized.wav"
 
 
@@ -42,15 +42,16 @@ def detect_vst_plugin(vst_name: str | None = None) -> bool:
 
     search_roots = [
         Path("C:/Program Files/Common Files/VST3"),
-        Path("/Library/Audio/Plug-Ins/VST3"),
-        Path("/usr/lib/vst3"),
+        Path("C:/Program Files/VSTPlugins"),
+        Path("C:/Program Files/Steinberg/VstPlugins"),
     ]
 
     for root in search_roots:
         if not root.exists():
             continue
-        for candidate in root.glob("*.vst3"):
+        for candidate in root.rglob("*.vst3"):   # ← recursive search
             if target in candidate.stem.lower():
+                print(f"Detected VST plugin: {candidate}")
                 return True
 
     print("Harmony Engine VST not found. Please install the plugin.")
@@ -61,36 +62,96 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
     if pretty_midi is None:
         raise RuntimeError("pretty_midi is required to generate MIDI chords")
 
-    timeline_path = Path(timeline_path)
-    output_midi = Path(output_midi)
+    with Path(timeline_path).open("r", encoding="utf-8") as f:
+        raw_timeline = json.load(f)
 
-    with timeline_path.open("r", encoding="utf-8") as f:
-        timeline = json.load(f)
+    if not raw_timeline:
+        raise RuntimeError("Timeline is empty")
 
-    midi = pretty_midi.PrettyMIDI()
-    instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
+    # 1. Parse your specific JSON format into solid blocks
+    blocks = []
+    current_block = None
 
-    root = 48  # C3
-    for seg in timeline:
+    for seg in raw_timeline:
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", start))
-        if end <= start:
-            continue
         degree = str(seg.get("degree", "ROOT")).upper()
-        intervals = INVERSION_TO_NOTES.get(degree, INVERSION_TO_NOTES["ROOT"])
-        for interval in intervals:
-            note = pretty_midi.Note(
-                velocity=96,
-                pitch=root + interval,
-                start=start,
-                end=end,
-            )
-            instrument.notes.append(note)
+
+        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
+            degree = "MUTE"
+
+        # If it's the first segment, start a block
+        if current_block is None:
+            current_block = {"start": start, "end": end, "degree": degree}
+        
+        # If the start time and chord are the same, just update the end time (holding the chord)
+        elif start == current_block["start"] and degree == current_block["degree"]:
+            current_block["end"] = end
+            
+        # If the start time or chord changes, save the finished block and start a new one
+        else:
+            blocks.append(current_block)
+            current_block = {"start": start, "end": end, "degree": degree}
+
+    # Save the very last block when the loop finishes
+    if current_block is not None:
+        blocks.append(current_block)
+
+    # 2. Write those solid blocks to the MIDI file
+    midi = pretty_midi.PrettyMIDI()
+    instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
+    root = 48  # C3
+    legato_overlap = 0.05  # 50ms overlap to prevent VST audio clipping
+
+    for block in blocks:
+        if block["degree"] != "MUTE":
+            intervals = INVERSION_TO_NOTES.get(block["degree"], INVERSION_TO_NOTES["ROOT"])
+            for interval in intervals:
+                note = pretty_midi.Note(
+                    velocity=96,
+                    pitch=root + interval,
+                    start=block["start"],
+                    end=block["end"] + legato_overlap,
+                )
+                instrument.notes.append(note)
 
     midi.instruments.append(instrument)
+    output_midi = Path(output_midi)
     output_midi.parent.mkdir(parents=True, exist_ok=True)
     midi.write(str(output_midi))
+    
     return output_midi
+
+
+def stabilize_timeline(timeline, min_hold=0.25):
+    # This acts as a shock absorber. Any gesture held for less than 
+    # 0.25 seconds is ignored as a "transition glitch".
+    if not timeline:
+        return []
+
+    cleaned = []
+    for seg in timeline:
+        degree = str(seg.get("degree", "ROOT")).upper()
+        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
+            degree = "MUTE"
+        cleaned.append({
+            "start": float(seg.get("start", 0.0)),
+            "end": float(seg.get("end", 0.0)),
+            "degree": degree
+        })
+
+    stable = []
+    for i, seg in enumerate(cleaned):
+        # Check how long this specific gesture lasted
+        if i + 1 < len(cleaned):
+            duration = cleaned[i+1]["start"] - seg["start"]
+            if duration < min_hold:
+                continue # Ignore it! The previous chord will just keep holding.
+        
+        if not stable or stable[-1]["degree"] != seg["degree"]:
+            stable.append(seg)
+
+    return stable
 
 
 def render_with_reaper(session_path: Path | str, midi_path: Path | str | None = None) -> Path | None:
