@@ -103,22 +103,25 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
         raw_timeline = json.load(f)
 
     blocks = normalize_timeline_segments(raw_timeline)
-    if not blocks:
+    sounding_blocks = [block for block in blocks if block["degree"] != "MUTE"]
+    if not sounding_blocks:
         raise RuntimeError("Timeline is empty")
 
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
     root = 48  # C3
-    legato_bridge_s = 0.03
 
-    for idx, block in enumerate(blocks):
-        if block["degree"] == "MUTE":
-            continue
-
-        next_block = blocks[idx + 1] if idx + 1 < len(blocks) else None
+    for idx, block in enumerate(sounding_blocks):
+        next_block = sounding_blocks[idx + 1] if idx + 1 < len(sounding_blocks) else None
         note_end = max(block["start"] + 0.01, block["end"])
-        if next_block and next_block["degree"] != "MUTE":
-            note_end = max(note_end, next_block["start"] + legato_bridge_s)
+        pedal_end = next_block["start"] if next_block else note_end
+
+        instrument.control_changes.append(
+            pretty_midi.ControlChange(number=64, value=127, time=block["start"])
+        )
+        instrument.control_changes.append(
+            pretty_midi.ControlChange(number=64, value=0, time=max(block["start"] + 0.001, pedal_end))
+        )
 
         intervals = INVERSION_TO_NOTES.get(block["degree"], INVERSION_TO_NOTES["ROOT"])
         for interval in intervals:
@@ -134,7 +137,7 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
     output_midi = Path(output_midi)
     output_midi.parent.mkdir(parents=True, exist_ok=True)
     midi.write(str(output_midi))
-    
+
     return output_midi
 
 
