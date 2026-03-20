@@ -1,13 +1,19 @@
 package com.harmony.gestureharmonytoolui;
 
+import javafx.animation.AnimationTimer;
 import javafx.application.Platform;
 import javafx.fxml.FXML;
 import javafx.scene.control.Button;
+import javafx.scene.control.ButtonBar;
+import javafx.scene.control.ButtonType;
 import javafx.scene.control.ComboBox;
+import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
+import javafx.scene.control.ListCell;
 import javafx.scene.image.ImageView;
 import javafx.scene.image.PixelWriter;
 import javafx.scene.image.WritableImage;
+import javafx.scene.layout.GridPane;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
@@ -22,8 +28,11 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
@@ -32,6 +41,8 @@ import java.util.stream.Stream;
 public class HarmonyController {
 
     private static final String GESTURE_GUIDE = "Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4.";
+    private static final String MANUAL_CHORDS_CONFIG = "chord_preferences.json";
+    private static final List<String> GESTURE_CODES = List.of("ONE", "TWO_MINOR", "THREE_MINOR", "FOUR");
 
     private String currentSessionPath;
     private boolean isRecording;
@@ -47,6 +58,9 @@ public class HarmonyController {
 
     private MediaPlayer previewMediaPlayer;
     private Path harmonizedVideoPath;
+    private WritableImage placeholderImage;
+    private AnimationTimer placeholderAnimationTimer;
+    private long placeholderAnimationStartNanos = -1L;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
@@ -65,6 +79,28 @@ public class HarmonyController {
 
     @FXML private ImageView previewImageView;
     @FXML private MediaView outputMediaView;
+
+    private enum ChordMode {
+        AUTOMATIC,
+        MANUAL
+    }
+
+    private record ChordOption(String label, List<Integer> intervals) {
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private record KeyOption(String label, int rootNote, String scaleType) {
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private record RecordingChordConfig(ChordMode mode, KeyOption key, Map<String, ChordOption> mappings) {
+    }
 
     public static class MediaDevice {
         private final String name;
@@ -102,42 +138,113 @@ public class HarmonyController {
     private void loadPlaceholderImage() {
         int width = 1280;
         int height = 720;
-        WritableImage image = new WritableImage(width, height);
-        PixelWriter writer = image.getPixelWriter();
+        placeholderImage = new WritableImage(width, height);
+        previewImageView.setImage(placeholderImage);
+        renderPlaceholderFrame(0.0);
+        startPlaceholderAnimation();
+    }
 
-        double centerX = width * 0.52;
-        double centerY = height * 0.48;
-
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                double xRatio = (double) x / width;
-                double yRatio = (double) y / height;
-
-                double red = 0.07 + (0.12 * xRatio);
-                double green = 0.11 + (0.24 * yRatio);
-                double blue = 0.20 + (0.28 * ((xRatio + yRatio) / 2.0));
-
-                double distance = Math.hypot(x - centerX, y - centerY);
-                double glow = Math.max(0.0, 1.0 - (distance / 260.0));
-
-                red = Math.min(1.0, red + (0.32 * glow));
-                green = Math.min(1.0, green + (0.34 * glow));
-                blue = Math.min(1.0, blue + (0.45 * glow));
-
-                boolean guideBand = Math.abs(y - (height * 0.23)) < 2
-                        || Math.abs(y - (height * 0.50)) < 2
-                        || Math.abs(y - (height * 0.77)) < 2;
-                if (guideBand) {
-                    red = Math.min(1.0, red + 0.10);
-                    green = Math.min(1.0, green + 0.12);
-                    blue = Math.min(1.0, blue + 0.16);
-                }
-
-                writer.setColor(x, y, Color.color(red, green, blue));
-            }
+    private void startPlaceholderAnimation() {
+        if (placeholderAnimationTimer != null) {
+            return;
         }
 
-        previewImageView.setImage(image);
+        placeholderAnimationTimer = new AnimationTimer() {
+            @Override
+            public void handle(long now) {
+                if (placeholderAnimationStartNanos < 0L) {
+                    placeholderAnimationStartNanos = now;
+                }
+                double elapsedSeconds = (now - placeholderAnimationStartNanos) / 1_000_000_000.0;
+                if (previewImageView.isVisible()) {
+                    renderPlaceholderFrame(elapsedSeconds);
+                }
+            }
+        };
+        placeholderAnimationTimer.start();
+    }
+
+    private void renderPlaceholderFrame(double timeSeconds) {
+        if (placeholderImage == null) {
+            return;
+        }
+
+        int width = (int) placeholderImage.getWidth();
+        int height = (int) placeholderImage.getHeight();
+        PixelWriter writer = placeholderImage.getPixelWriter();
+
+        double centerX = width * 0.5;
+        double centerY = height * 0.5;
+        double time = timeSeconds * 0.65;
+
+        double[][] particles = {
+                {0.17, 0.86, 1.8, 3.2, 0.7, 0.50, 22},
+                {0.38, 0.78, 2.6, 2.1, 1.9, 0.64, 18},
+                {0.69, 0.82, 3.4, 1.6, 2.7, 0.74, 24},
+                {0.88, 0.74, 1.9, 4.1, 3.6, 0.58, 20},
+                {0.54, 0.92, 2.1, 2.8, 4.3, 0.69, 26},
+                {0.25, 0.68, 4.3, 1.3, 5.1, 0.43, 16}
+        };
+
+        double[] orbitX = new double[particles.length];
+        double[] orbitY = new double[particles.length];
+        double[] radius = new double[particles.length];
+
+        for (int i = 0; i < particles.length; i++) {
+            double[] particle = particles[i];
+            orbitX[i] = centerX
+                    + Math.sin(time * particle[2] + particle[4]) * width * particle[0] * 0.38
+                    + Math.cos(time * (particle[3] * 0.58) - particle[4]) * width * 0.09;
+            orbitY[i] = centerY
+                    + Math.cos(time * particle[3] + particle[4]) * height * particle[1] * 0.26
+                    + Math.sin(time * (particle[2] * 0.72) + particle[4]) * height * 0.08;
+            radius[i] = particle[6];
+        }
+
+        for (int y = 0; y < height; y++) {
+            double normalizedY = (y - centerY) / height;
+            for (int x = 0; x < width; x++) {
+                double normalizedX = (x - centerX) / width;
+                double radial = Math.hypot(normalizedX * 1.12, normalizedY * 0.9);
+
+                double waveA = Math.sin((normalizedX * 14.0) + (time * 1.8));
+                double waveB = Math.cos((normalizedY * 18.0) - (time * 1.35));
+                double waveC = Math.sin(((normalizedX + normalizedY) * 24.0) + (time * 2.25));
+                double lattice = Math.sin((normalizedX * normalizedX * 52.0) - (time * 0.95))
+                        + Math.cos((normalizedY * normalizedY * 44.0) + (time * 1.2));
+
+                double field = 0.5 + 0.5 * Math.sin((waveA + waveB + waveC) * 0.85 + lattice * 0.4);
+                double nebula = Math.max(0.0, 1.0 - radial * 1.75);
+
+                double red = 0.03 + 0.07 * nebula + 0.05 * field;
+                double green = 0.05 + 0.16 * nebula + 0.08 * field;
+                double blue = 0.10 + 0.24 * nebula + 0.22 * field;
+
+                for (int i = 0; i < orbitX.length; i++) {
+                    double dx = x - orbitX[i];
+                    double dy = y - orbitY[i];
+                    double influence = Math.exp(-(dx * dx + dy * dy) / (2.0 * radius[i] * radius[i]));
+                    red += influence * (0.18 + (i * 0.02));
+                    green += influence * (0.24 + (i * 0.015));
+                    blue += influence * (0.34 + (i * 0.02));
+                }
+
+                double strandOne = Math.sin((normalizedX * 30.0) + time * 2.6)
+                        + Math.cos((normalizedY * 28.0) - time * 1.9);
+                double strandTwo = Math.cos((normalizedX * 20.0) - (normalizedY * 22.0) + time * 1.4);
+                double filament = Math.exp(-Math.abs(strandOne + strandTwo) * 1.6);
+
+                red += filament * 0.05;
+                green += filament * 0.09;
+                blue += filament * 0.12;
+
+                writer.setColor(x, y, Color.color(
+                        Math.min(1.0, red),
+                        Math.min(1.0, green),
+                        Math.min(1.0, blue)
+                ));
+            }
+        }
     }
 
     private void loadHardwareDevices() {
@@ -254,6 +361,244 @@ public class HarmonyController {
         }, "device-loader").start();
     }
 
+    private Optional<RecordingChordConfig> promptForRecordingChordConfig() {
+        ButtonType automaticButton = new ButtonType("Automatic", ButtonBar.ButtonData.OK_DONE);
+        ButtonType manualButton = new ButtonType("Manual", ButtonBar.ButtonData.OTHER);
+        ButtonType cancelButton = new ButtonType("Cancel", ButtonBar.ButtonData.CANCEL_CLOSE);
+
+        Dialog<ButtonType> modeDialog = new Dialog<>();
+        modeDialog.setTitle("Choose chord workflow");
+        modeDialog.setHeaderText("How should the harmony chords be prepared for this take?");
+        modeDialog.getDialogPane().setContent(new Label(
+                "Automatic keeps the current key-detection logic.\n"
+                        + "Manual lets you choose the key and the four gesture-to-chord mappings before recording starts."
+        ));
+        modeDialog.getDialogPane().getButtonTypes().addAll(automaticButton, manualButton, cancelButton);
+
+        Optional<ButtonType> result = modeDialog.showAndWait();
+        if (result.isEmpty() || result.get() == cancelButton) {
+            return Optional.empty();
+        }
+        if (result.get() == automaticButton) {
+            return Optional.of(new RecordingChordConfig(ChordMode.AUTOMATIC, null, Map.of()));
+        }
+
+        return showManualChordDialog();
+    }
+
+    private Optional<RecordingChordConfig> showManualChordDialog() {
+        Dialog<RecordingChordConfig> dialog = new Dialog<>();
+        dialog.setTitle("Manual chord setup");
+        dialog.setHeaderText("Choose the song key and the four gesture chord mappings.");
+
+        ButtonType confirmButton = new ButtonType("Use Manual Mapping", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(confirmButton, ButtonType.CANCEL);
+
+        ComboBox<KeyOption> keyComboBox = new ComboBox<>();
+        keyComboBox.getItems().setAll(buildKeyOptions());
+        keyComboBox.getSelectionModel().selectFirst();
+        keyComboBox.setPrefWidth(220);
+
+        Map<String, ComboBox<ChordOption>> mappingBoxes = new LinkedHashMap<>();
+        GridPane grid = new GridPane();
+        grid.setHgap(12);
+        grid.setVgap(12);
+
+        grid.add(new Label("Key"), 0, 0);
+        grid.add(keyComboBox, 1, 0);
+
+        int row = 1;
+        for (String gestureCode : GESTURE_CODES) {
+            ComboBox<ChordOption> comboBox = new ComboBox<>();
+            comboBox.setPrefWidth(220);
+            comboBox.setCellFactory(listView -> new ListCell<>() {
+                @Override
+                protected void updateItem(ChordOption item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.label());
+                }
+            });
+            comboBox.setButtonCell(new ListCell<>() {
+                @Override
+                protected void updateItem(ChordOption item, boolean empty) {
+                    super.updateItem(item, empty);
+                    setText(empty || item == null ? null : item.label());
+                }
+            });
+            mappingBoxes.put(gestureCode, comboBox);
+            grid.add(new Label(gesturePromptLabel(gestureCode)), 0, row);
+            grid.add(comboBox, 1, row);
+            row++;
+        }
+
+        Runnable refreshMappings = () -> {
+            KeyOption key = keyComboBox.getValue();
+            List<ChordOption> chordOptions = buildChordOptionsForScale(key != null ? key.scaleType() : "major");
+            for (Map.Entry<String, ComboBox<ChordOption>> entry : mappingBoxes.entrySet()) {
+                ComboBox<ChordOption> comboBox = entry.getValue();
+                ChordOption current = comboBox.getValue();
+                comboBox.getItems().setAll(chordOptions);
+                ChordOption preferred = findPreferredChordOption(chordOptions, defaultChordLabelForGesture(entry.getKey(), key));
+                if (current != null && chordOptions.stream().anyMatch(option -> option.label().equals(current.label()))) {
+                    comboBox.getSelectionModel().select(
+                            chordOptions.stream()
+                                    .filter(option -> option.label().equals(current.label()))
+                                    .findFirst()
+                                    .orElse(preferred)
+                    );
+                } else {
+                    comboBox.getSelectionModel().select(preferred);
+                }
+            }
+        };
+
+        keyComboBox.valueProperty().addListener((observable, oldValue, newValue) -> refreshMappings.run());
+        refreshMappings.run();
+
+        dialog.getDialogPane().setContent(grid);
+        dialog.setResultConverter(buttonType -> {
+            if (buttonType != confirmButton) {
+                return null;
+            }
+
+            KeyOption selectedKey = keyComboBox.getValue();
+            if (selectedKey == null) {
+                return null;
+            }
+
+            Map<String, ChordOption> mappings = new LinkedHashMap<>();
+            for (String gestureCode : GESTURE_CODES) {
+                ChordOption option = mappingBoxes.get(gestureCode).getValue();
+                if (option == null) {
+                    return null;
+                }
+                mappings.put(gestureCode, option);
+            }
+            return new RecordingChordConfig(ChordMode.MANUAL, selectedKey, mappings);
+        });
+
+        return dialog.showAndWait();
+    }
+
+    private List<KeyOption> buildKeyOptions() {
+        String[] noteNames = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+        List<KeyOption> options = new ArrayList<>();
+        for (int i = 0; i < noteNames.length; i++) {
+            options.add(new KeyOption(noteNames[i] + " Major", 48 + i, "major"));
+        }
+        for (int i = 0; i < noteNames.length; i++) {
+            options.add(new KeyOption(noteNames[i] + " Minor", 48 + i, "minor"));
+        }
+        return options;
+    }
+
+    private List<ChordOption> buildChordOptionsForScale(String scaleType) {
+        boolean minor = "minor".equalsIgnoreCase(scaleType);
+        List<ChordOption> options = new ArrayList<>();
+        if (minor) {
+            options.add(new ChordOption("i", List.of(0, 3, 7)));
+            options.add(new ChordOption("ii°", List.of(2, 5, 8)));
+            options.add(new ChordOption("III", List.of(3, 7, 10)));
+            options.add(new ChordOption("iv", List.of(5, 8, 12)));
+            options.add(new ChordOption("v", List.of(7, 10, 14)));
+            options.add(new ChordOption("VI", List.of(8, 12, 15)));
+            options.add(new ChordOption("VII", List.of(10, 14, 17)));
+        } else {
+            options.add(new ChordOption("I", List.of(0, 4, 7)));
+            options.add(new ChordOption("ii", List.of(2, 5, 9)));
+            options.add(new ChordOption("iii", List.of(4, 7, 11)));
+            options.add(new ChordOption("IV", List.of(5, 9, 12)));
+            options.add(new ChordOption("V", List.of(7, 11, 14)));
+            options.add(new ChordOption("vi", List.of(9, 12, 16)));
+            options.add(new ChordOption("vii°", List.of(11, 14, 17)));
+        }
+        return options;
+    }
+
+    private String defaultChordLabelForGesture(String gestureCode, KeyOption keyOption) {
+        boolean minor = keyOption != null && "minor".equalsIgnoreCase(keyOption.scaleType());
+        return switch (gestureCode) {
+            case "ONE" -> minor ? "i" : "I";
+            case "TWO_MINOR" -> minor ? "ii°" : "ii";
+            case "THREE_MINOR" -> minor ? "III" : "iii";
+            case "FOUR" -> minor ? "iv" : "IV";
+            default -> minor ? "i" : "I";
+        };
+    }
+
+    private ChordOption findPreferredChordOption(List<ChordOption> options, String label) {
+        return options.stream()
+                .filter(option -> option.label().equals(label))
+                .findFirst()
+                .orElse(options.getFirst());
+    }
+
+    private String gesturePromptLabel(String gestureCode) {
+        return switch (gestureCode) {
+            case "ONE" -> "1 finger";
+            case "TWO_MINOR" -> "2 fingers";
+            case "THREE_MINOR" -> "3 fingers";
+            case "FOUR" -> "4 fingers";
+            default -> gestureCode;
+        };
+    }
+
+    private String summarizeManualSelection(RecordingChordConfig config) {
+        if (config.key() == null || config.mappings().isEmpty()) {
+            return "manual setup";
+        }
+        return config.key().label() + " | 1→" + config.mappings().get("ONE").label()
+                + ", 2→" + config.mappings().get("TWO_MINOR").label()
+                + ", 3→" + config.mappings().get("THREE_MINOR").label()
+                + ", 4→" + config.mappings().get("FOUR").label();
+    }
+
+    private void persistChordPreferences(Path sessionDir, RecordingChordConfig config) throws IOException {
+        StringBuilder json = new StringBuilder();
+        json.append("{\n");
+        json.append("  \"mode\": \"").append(config.mode().name().toLowerCase()).append("\"");
+
+        if (config.mode() == ChordMode.MANUAL && config.key() != null) {
+            json.append(",\n  \"key\": {\n");
+            json.append("    \"label\": \"").append(escapeJson(config.key().label())).append("\",\n");
+            json.append("    \"root_note\": ").append(config.key().rootNote()).append(",\n");
+            json.append("    \"scale_type\": \"").append(escapeJson(config.key().scaleType())).append("\"\n");
+            json.append("  },\n");
+            json.append("  \"mappings\": {\n");
+
+            int index = 0;
+            for (String gestureCode : GESTURE_CODES) {
+                ChordOption option = config.mappings().get(gestureCode);
+                json.append("    \"").append(gestureCode).append("\": {\n");
+                json.append("      \"label\": \"").append(escapeJson(option.label())).append("\",\n");
+                json.append("      \"intervals\": [");
+                for (int i = 0; i < option.intervals().size(); i++) {
+                    if (i > 0) {
+                        json.append(", ");
+                    }
+                    json.append(option.intervals().get(i));
+                }
+                json.append("]\n");
+                json.append("    }");
+                if (index < GESTURE_CODES.size() - 1) {
+                    json.append(",");
+                }
+                json.append("\n");
+                index++;
+            }
+            json.append("  }\n");
+        } else {
+            json.append("\n");
+        }
+
+        json.append("}\n");
+        Files.writeString(sessionDir.resolve(MANUAL_CHORDS_CONFIG), json.toString(), StandardCharsets.UTF_8);
+    }
+
+    private String escapeJson(String value) {
+        return value.replace("\\", "\\\\").replace("\"", "\\\"");
+    }
+
     private String extractBetweenQuotes(String text) {
         int start = text.indexOf('"');
         int end = text.lastIndexOf('"');
@@ -277,9 +622,29 @@ public class HarmonyController {
             return;
         }
 
+        Optional<RecordingChordConfig> configSelection = promptForRecordingChordConfig();
+        if (configSelection.isEmpty()) {
+            status.setText("Recording canceled before the chord workflow was selected.");
+            return;
+        }
+        RecordingChordConfig recordingChordConfig = configSelection.get();
+
         resetPreviewForNewCapture();
         currentSessionPath = SessionManager.createNewSession();
-        sessionLabel.setText("Current session: " + currentSessionPath + "\n" + GESTURE_GUIDE);
+        sessionLabel.setText("Current session: " + currentSessionPath + "\n" + GESTURE_GUIDE + "\nChord mode: "
+                + (recordingChordConfig.mode() == ChordMode.MANUAL
+                ? "Manual — " + summarizeManualSelection(recordingChordConfig)
+                : "Automatic detection"));
+
+        Path sessionDir = Path.of(currentSessionPath);
+        try {
+            Files.createDirectories(sessionDir);
+            persistChordPreferences(sessionDir, recordingChordConfig);
+        } catch (IOException e) {
+            status.setText("Failed to prepare the session chord settings.");
+            deleteCurrentSessionQuietly();
+            return;
+        }
 
         if (!startLiveFeedbackStream()) {
             status.setText("Unable to start the gesture feedback pipeline.");
@@ -289,17 +654,6 @@ public class HarmonyController {
 
         isRecording = true;
         harmonizedVideoPath = null;
-
-        Path sessionDir = Path.of(currentSessionPath);
-        try {
-            Files.createDirectories(sessionDir);
-        } catch (IOException e) {
-            status.setText("Failed to create the session directory.");
-            isRecording = false;
-            stopLiveFeedbackStream();
-            deleteCurrentSessionQuietly();
-            return;
-        }
 
         String videoPath = sessionDir.resolve("video.mp4").toString();
         String primaryVideoName = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();

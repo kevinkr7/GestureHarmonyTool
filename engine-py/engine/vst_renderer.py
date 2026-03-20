@@ -27,6 +27,30 @@ except ImportError:  # pragma: no cover
     pretty_midi = None
 
 VALID_DEGREES = {"ONE", "TWO_MINOR", "THREE_MINOR", "FOUR"}
+AUTO_MAJOR_CHORD_MAP = {
+    "ONE": [0, 4, 7],
+    "TWO_MINOR": [2, 5, 9],
+    "THREE_MINOR": [4, 7, 11],
+    "FOUR": [5, 9, 12],
+}
+AUTO_MINOR_CHORD_MAP = {
+    "ONE": [0, 3, 7],
+    "TWO_MINOR": [2, 5, 9],
+    "THREE_MINOR": [4, 7, 11],
+    "FOUR": [5, 9, 12],
+}
+MANUAL_MAJOR_CHORD_MAP = {
+    "ONE": [0, 4, 7],
+    "TWO_MINOR": [2, 5, 9],
+    "THREE_MINOR": [4, 7, 11],
+    "FOUR": [5, 9, 12],
+}
+MANUAL_MINOR_CHORD_MAP = {
+    "ONE": [0, 3, 7],
+    "TWO_MINOR": [2, 5, 8],
+    "THREE_MINOR": [3, 7, 10],
+    "FOUR": [5, 8, 12],
+}
 
 def detect_song_key(audio_path: Path) -> tuple[int, str]:
     """Analyzes audio to detect the root MIDI note and scale type (major/minor)."""
@@ -127,7 +151,59 @@ def detect_vst_plugin(vst_name: str | None = None) -> bool:
     return False
 
 
-def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str, root_note: int, scale_type: str) -> Path:
+def load_chord_preferences(session_path: Path | str) -> dict:
+    session_path = Path(session_path)
+    config_path = session_path / "chord_preferences.json"
+    if not config_path.exists():
+        return {"mode": "automatic"}
+
+    with config_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    if not isinstance(data, dict):
+        return {"mode": "automatic"}
+    return data
+
+
+def resolve_chord_strategy(session_path: Path, source_vocal: Path) -> tuple[int, str, dict[str, list[int]], str]:
+    preferences = load_chord_preferences(session_path)
+    mode = str(preferences.get("mode", "automatic")).lower()
+
+    if mode != "manual":
+        root_note, scale_type = detect_song_key(source_vocal)
+        chord_map = AUTO_MINOR_CHORD_MAP if scale_type == "minor" else AUTO_MAJOR_CHORD_MAP
+        return root_note, scale_type, chord_map, "automatic key detection"
+
+    key = preferences.get("key") or {}
+    mappings = preferences.get("mappings") or {}
+
+    root_note = int(key.get("root_note", 48))
+    scale_type = str(key.get("scale_type", "major")).lower()
+    if scale_type not in {"major", "minor"}:
+        scale_type = "major"
+
+    fallback_map = MANUAL_MINOR_CHORD_MAP if scale_type == "minor" else MANUAL_MAJOR_CHORD_MAP
+    chord_map: dict[str, list[int]] = {}
+
+    for degree, fallback_intervals in fallback_map.items():
+        manual_mapping = mappings.get(degree) or {}
+        intervals = manual_mapping.get("intervals")
+        if isinstance(intervals, list) and len(intervals) >= 3:
+            chord_map[degree] = [int(value) for value in intervals[:3]]
+        else:
+            chord_map[degree] = fallback_intervals
+
+    key_label = key.get("label") or f"MIDI root {root_note} {scale_type.title()}"
+    return root_note, scale_type, chord_map, f"manual mapping in {key_label}"
+
+
+def generate_chord_midi(
+    timeline_path: Path | str,
+    output_midi: Path | str,
+    root_note: int,
+    scale_type: str,
+    chord_map: dict[str, list[int]] | None = None,
+) -> Path:
     if pretty_midi is None:
         raise RuntimeError("pretty_midi is required to generate MIDI chords")
 
@@ -142,13 +218,8 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str, root
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
 
-    tonic_third = 3 if scale_type == "minor" else 4
-    chord_map = {
-        "ONE": [0, tonic_third, 7],
-        "TWO_MINOR": [2, 5, 9],
-        "THREE_MINOR": [4, 7, 11],
-        "FOUR": [5, 9, 12],
-    }
+    fallback_map = AUTO_MINOR_CHORD_MAP if scale_type == "minor" else AUTO_MAJOR_CHORD_MAP
+    chord_map = chord_map or fallback_map
 
     for idx, block in enumerate(sounding_blocks):
         next_block = sounding_blocks[idx + 1] if idx + 1 < len(sounding_blocks) else None
@@ -245,13 +316,14 @@ def render_session(session_path: Path | str) -> Path | None:
         raise FileNotFoundError(f"Missing session vocal file: {source_vocal}")
 
     detect_vst_plugin()
-    
-    # 1. Detect the key from the vocal track
-    root_note, scale_type = detect_song_key(source_vocal)
-    
-    # 2. Pass the detected key into the MIDI generator
-    generate_chord_midi(timeline, midi, root_note, scale_type)
-    
+
+    # 1. Resolve either the saved manual selection or the existing automatic detection path
+    root_note, scale_type, chord_map, strategy_label = resolve_chord_strategy(session_path, source_vocal)
+    print(f"Using chord strategy: {strategy_label}")
+
+    # 2. Pass the selected key and chord map into the MIDI generator
+    generate_chord_midi(timeline, midi, root_note, scale_type, chord_map=chord_map)
+
     # 3. Render
     return render_with_reaper(session_path, midi)
 
