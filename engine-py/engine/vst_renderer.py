@@ -5,6 +5,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+import re
+
+# New imports for key detection
+import librosa
+import numpy as np
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ENGINE_ROOT = SCRIPT_DIR.parent
@@ -12,7 +17,7 @@ ENGINE_ROOT = SCRIPT_DIR.parent
 PLUGIN_CONFIG_PATH = ENGINE_ROOT / "config" / "plugin_config.json"
 TEMPLATE_PATH = ENGINE_ROOT / "templates" / "harmony_template.rpp"
 TEMPLATE_VOCAL = ENGINE_ROOT / "templates" / "Media" / "input_vocal-imported.wav"
-TEMPLATE_MIDI = ENGINE_ROOT / "templates" / "Media" / "chords.mid"
+TEMPLATE_MIDI = ENGINE_ROOT / "templates" / "Media" / "chords-imported.mid"
 TEMPLATE_RENDERED = ENGINE_ROOT / "templates" / "harmonized.wav"
 
 
@@ -21,12 +26,39 @@ try:
 except ImportError:  # pragma: no cover
     pretty_midi = None
 
+VALID_DEGREES = {"ROOT", "FIRST_INV", "THIRD_INV"}
 
-INVERSION_TO_NOTES = {
-    "ROOT": [0, 4, 7],
-    "FIRST_INV": [4, 7, 12],
-    "THIRD_INV": [7, 12, 16],
-}
+def detect_song_key(audio_path: Path) -> tuple[int, str]:
+    """Analyzes audio to detect the root MIDI note and scale type (major/minor)."""
+    print(f"Analyzing vocal track to detect key: {audio_path.name}...")
+    try:
+        y, sr = librosa.load(str(audio_path), sr=None, mono=True)
+        chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+        chroma_sum = np.sum(chroma, axis=1)
+
+        # Krumhansl-Schmuckler key profiles
+        maj_profile = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+        min_profile = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+        # Correlate the audio's pitch heatmap against the 12 possible major/minor keys
+        maj_corrs = [np.corrcoef(chroma_sum, np.roll(maj_profile, i))[0, 1] for i in range(12)]
+        min_corrs = [np.corrcoef(chroma_sum, np.roll(min_profile, i))[0, 1] for i in range(12)]
+
+        best_maj = int(np.argmax(maj_corrs))
+        best_min = int(np.argmax(min_corrs))
+
+        note_names = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
+        if maj_corrs[best_maj] > min_corrs[best_min]:
+            print(f"--> Auto-Detected Key: {note_names[best_maj]} Major")
+            return 48 + best_maj, "major"  # 48 is C3
+        else:
+            print(f"--> Auto-Detected Key: {note_names[best_min]} Minor")
+            return 48 + best_min, "minor"
+            
+    except Exception as e:
+        print(f"Key detection failed: {e}. Defaulting to C Major.")
+        return 48, "major"
 
 
 def normalize_timeline_segments(raw_timeline, min_duration: float = 0.05) -> list[dict]:
@@ -36,7 +68,7 @@ def normalize_timeline_segments(raw_timeline, min_duration: float = 0.05) -> lis
         end = float(seg.get("end", start))
         degree = str(seg.get("degree", "ROOT")).upper()
 
-        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
+        if degree not in VALID_DEGREES and degree != "MUTE":
             degree = "MUTE"
         if end <= start:
             continue
@@ -86,7 +118,7 @@ def detect_vst_plugin(vst_name: str | None = None) -> bool:
     for root in search_roots:
         if not root.exists():
             continue
-        for candidate in root.rglob("*.vst3"):   # ← recursive search
+        for candidate in root.rglob("*.vst3"):
             if target in candidate.stem.lower():
                 print(f"Detected VST plugin: {candidate}")
                 return True
@@ -95,7 +127,7 @@ def detect_vst_plugin(vst_name: str | None = None) -> bool:
     return False
 
 
-def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> Path:
+def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str, root_note: int, scale_type: str) -> Path:
     if pretty_midi is None:
         raise RuntimeError("pretty_midi is required to generate MIDI chords")
 
@@ -109,7 +141,20 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
 
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
-    root = 48  # C3
+
+    # Dynamically set the chord intervals based on the detected scale
+    if scale_type == "minor":
+        inversion_map = {
+            "ROOT": [0, 3, 7],         # Root, Minor 3rd, 5th
+            "FIRST_INV": [3, 7, 12],   # Minor 3rd, 5th, Root(+Octave)
+            "THIRD_INV": [7, 12, 15],  # 5th, Root(+Octave), Minor 3rd(+Octave)
+        }
+    else:
+        inversion_map = {
+            "ROOT": [0, 4, 7],         # Root, Major 3rd, 5th
+            "FIRST_INV": [4, 7, 12],   # Major 3rd, 5th, Root(+Octave)
+            "THIRD_INV": [7, 12, 16],  # 5th, Root(+Octave), Major 3rd(+Octave)
+        }
 
     for idx, block in enumerate(sounding_blocks):
         next_block = sounding_blocks[idx + 1] if idx + 1 < len(sounding_blocks) else None
@@ -123,11 +168,11 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
             pretty_midi.ControlChange(number=64, value=0, time=max(block["start"] + 0.001, pedal_end))
         )
 
-        intervals = INVERSION_TO_NOTES.get(block["degree"], INVERSION_TO_NOTES["ROOT"])
+        intervals = inversion_map.get(block["degree"], inversion_map["ROOT"])
         for interval in intervals:
             note = pretty_midi.Note(
                 velocity=96,
-                pitch=root + interval,
+                pitch=root_note + interval,
                 start=block["start"],
                 end=note_end,
             )
@@ -139,37 +184,6 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str) -> P
     midi.write(str(output_midi))
 
     return output_midi
-
-
-def stabilize_timeline(timeline, min_hold=0.25):
-    # This acts as a shock absorber. Any gesture held for less than 
-    # 0.25 seconds is ignored as a "transition glitch".
-    if not timeline:
-        return []
-
-    cleaned = []
-    for seg in timeline:
-        degree = str(seg.get("degree", "ROOT")).upper()
-        if degree not in INVERSION_TO_NOTES and degree != "MUTE":
-            degree = "MUTE"
-        cleaned.append({
-            "start": float(seg.get("start", 0.0)),
-            "end": float(seg.get("end", 0.0)),
-            "degree": degree
-        })
-
-    stable = []
-    for i, seg in enumerate(cleaned):
-        # Check how long this specific gesture lasted
-        if i + 1 < len(cleaned):
-            duration = cleaned[i+1]["start"] - seg["start"]
-            if duration < min_hold:
-                continue # Ignore it! The previous chord will just keep holding.
-        
-        if not stable or stable[-1]["degree"] != seg["degree"]:
-            stable.append(seg)
-
-    return stable
 
 
 def render_with_reaper(session_path: Path | str, midi_path: Path | str | None = None) -> Path | None:
@@ -188,9 +202,26 @@ def render_with_reaper(session_path: Path | str, midi_path: Path | str | None = 
     if not TEMPLATE_PATH.exists():
         raise FileNotFoundError(f"Missing Reaper template: {TEMPLATE_PATH}")
 
+    # 1. Copy the media files to the template directory
     shutil.copy2(source_vocal, TEMPLATE_VOCAL)
     shutil.copy2(midi_path, TEMPLATE_MIDI)
 
+    # 2. Get the exact duration of the newly recorded audio
+    audio_length = librosa.get_duration(path=str(source_vocal))
+    
+    # 3. Open the master Reaper template as raw text
+    with open(TEMPLATE_PATH, "r", encoding="utf-8") as f:
+        rpp_data = f.read()
+        
+    # 4. Modify the lengths and loops in memory
+    rpp_data = re.sub(r"LENGTH [\d\.]+", f"LENGTH {audio_length}", rpp_data)
+    rpp_data = re.sub(r"LOOP 1", "LOOP 0", rpp_data)
+    
+    # 5. Overwrite the master template IN-PLACE (no temp files created)
+    with open(TEMPLATE_PATH, "w", encoding="utf-8") as f:
+        f.write(rpp_data)
+
+    # 6. Command Reaper to render the updated master template
     command = [str(reaper_path), "-renderproject", str(TEMPLATE_PATH)]
     try:
         subprocess.run(command, cwd=str(ENGINE_ROOT), check=True)
@@ -212,12 +243,22 @@ def render_session(session_path: Path | str) -> Path | None:
     session_path = Path(session_path)
     timeline = session_path / "timeline.json"
     midi = session_path / "chords.mid"
+    source_vocal = session_path / "output.wav"
 
     if not timeline.exists():
         raise FileNotFoundError(f"Missing session timeline: {timeline}")
+    if not source_vocal.exists():
+        raise FileNotFoundError(f"Missing session vocal file: {source_vocal}")
 
     detect_vst_plugin()
-    generate_chord_midi(timeline, midi)
+    
+    # 1. Detect the key from the vocal track
+    root_note, scale_type = detect_song_key(source_vocal)
+    
+    # 2. Pass the detected key into the MIDI generator
+    generate_chord_midi(timeline, midi, root_note, scale_type)
+    
+    # 3. Render
     return render_with_reaper(session_path, midi)
 
 
