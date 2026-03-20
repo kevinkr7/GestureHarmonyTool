@@ -2,19 +2,26 @@ package com.harmony.gestureharmonytoolui;
 
 import javafx.application.Platform;
 import javafx.fxml.FXML;
-import javafx.scene.control.*;
-import javafx.scene.control.Slider;
-import javafx.scene.layout.GridPane;
-import javafx.scene.layout.HBox;
-import javafx.scene.layout.VBox;
+import javafx.scene.control.Button;
+import javafx.scene.control.ComboBox;
+import javafx.scene.control.Label;
 import javafx.scene.image.ImageView;
+import javafx.scene.image.PixelWriter;
+import javafx.scene.image.WritableImage;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
+import javafx.scene.paint.Color;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
-import java.io.*;
+import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,13 +31,17 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-import java.util.stream.Collectors;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public class HarmonyController {
 
+    private static final String GESTURE_GUIDE = "Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4.";
+
     private String currentSessionPath;
     private boolean isRecording;
+    private boolean isProcessing;
     private Process ffmpegProcess;
     private BufferedWriter ffmpegStdin;
     private Thread ffmpegLogThread;
@@ -48,15 +59,17 @@ public class HarmonyController {
     @FXML private Label processingMessage;
     @FXML private Button startRecording;
     @FXML private Button stopRecording;
+    @FXML private Button cancelRecording;
     @FXML private Button saveVideoButton;
-    @FXML private VBox processingOverlay;
-    @FXML private VBox previewPlaceholder;
-    @FXML private HBox previewActions;
+    @FXML private Button playPauseButton;
+    @FXML private Button replayButton;
+    @FXML private javafx.scene.layout.VBox processingOverlay;
+    @FXML private javafx.scene.layout.HBox previewActions;
 
     @FXML private ComboBox<MediaDevice> videoDeviceComboBox;
     @FXML private ComboBox<MediaDevice> audioDeviceComboBox;
 
-    @FXML private ImageView feedbackImageView;
+    @FXML private ImageView previewImageView;
     @FXML private MediaView outputMediaView;
 
     public static class MediaDevice {
@@ -83,13 +96,59 @@ public class HarmonyController {
 
     @FXML
     public void initialize() {
+        loadPlaceholderImage();
         loadHardwareDevices();
         hideProcessingOverlay();
-        showPlaceholder("Camera preview opens when recording starts", "Click Start Recording to launch the gesture feedback window.");
+        showPlaceholderImage();
+        previewActions.setVisible(false);
+        previewActions.setManaged(false);
+        sessionLabel.setText(GESTURE_GUIDE + " Recording captures the gesture-feedback window output.");
+    }
+
+    private void loadPlaceholderImage() {
+        int width = 1280;
+        int height = 720;
+        WritableImage image = new WritableImage(width, height);
+        PixelWriter writer = image.getPixelWriter();
+
+        double centerX = width * 0.52;
+        double centerY = height * 0.48;
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                double xRatio = (double) x / width;
+                double yRatio = (double) y / height;
+
+                double red = 0.07 + (0.12 * xRatio);
+                double green = 0.11 + (0.24 * yRatio);
+                double blue = 0.20 + (0.28 * ((xRatio + yRatio) / 2.0));
+
+                double distance = Math.hypot(x - centerX, y - centerY);
+                double glow = Math.max(0.0, 1.0 - (distance / 260.0));
+
+                red = Math.min(1.0, red + (0.32 * glow));
+                green = Math.min(1.0, green + (0.34 * glow));
+                blue = Math.min(1.0, blue + (0.45 * glow));
+
+                boolean guideBand = Math.abs(y - (height * 0.23)) < 2
+                        || Math.abs(y - (height * 0.50)) < 2
+                        || Math.abs(y - (height * 0.77)) < 2;
+                if (guideBand) {
+                    red = Math.min(1.0, red + 0.10);
+                    green = Math.min(1.0, green + 0.12);
+                    blue = Math.min(1.0, blue + 0.16);
+                }
+
+                writer.setColor(x, y, Color.color(red, green, blue));
+            }
+        }
+
+        previewImageView.setImage(image);
     }
 
     private void loadHardwareDevices() {
         status.setText("Loading hardware devices...");
+        startRecording.setDisable(true);
 
         new Thread(() -> {
             List<MediaDevice> videoDevices = new ArrayList<>();
@@ -104,70 +163,70 @@ public class HarmonyController {
                 pb.redirectErrorStream(true);
                 Process process = pb.start();
 
-                BufferedReader reader = new BufferedReader(
+                try (BufferedReader reader = new BufferedReader(
                         new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)
-                );
+                )) {
+                    String line;
+                    MediaDevice currentDevice = null;
+                    final int sectionNone = 0;
+                    final int sectionVideo = 1;
+                    final int sectionAudio = 2;
+                    int currentSection = sectionNone;
 
-                String line;
-                MediaDevice currentDevice = null;
-                final int SECTION_NONE = 0;
-                final int SECTION_VIDEO = 1;
-                final int SECTION_AUDIO = 2;
-                int currentSection = SECTION_NONE;
+                    while ((line = reader.readLine()) != null) {
+                        System.out.println("[Device Scan] " + line);
+                        String lowerLine = line.toLowerCase();
 
-                while ((line = reader.readLine()) != null) {
-                    System.out.println("[Device Scan] " + line);
-                    String lowerLine = line.toLowerCase();
-
-                    if (lowerLine.contains("directshow video devices") || lowerLine.contains("video devices")) {
-                        currentSection = SECTION_VIDEO;
-                        currentDevice = null;
-                        continue;
-                    }
-                    if (lowerLine.contains("directshow audio devices") || lowerLine.contains("audio devices")) {
-                        currentSection = SECTION_AUDIO;
-                        currentDevice = null;
-                        continue;
-                    }
-
-                    if (!line.contains("\"")) {
-                        continue;
-                    }
-
-                    String extractedName = extractBetweenQuotes(line);
-                    if (extractedName == null) {
-                        continue;
-                    }
-
-                    if (lowerLine.contains("alternative name") && currentDevice != null) {
-                        currentDevice.setAltName(extractedName);
-                        continue;
-                    }
-
-                    if (lowerLine.contains("(video)")) {
-                        if (seenVideoNames.add(extractedName)) {
-                            currentDevice = new MediaDevice(extractedName);
-                            videoDevices.add(currentDevice);
+                        if (lowerLine.contains("directshow video devices") || lowerLine.contains("video devices")) {
+                            currentSection = sectionVideo;
+                            currentDevice = null;
+                            continue;
                         }
-                        continue;
-                    }
-                    if (lowerLine.contains("(audio)")) {
-                        if (seenAudioNames.add(extractedName)) {
-                            currentDevice = new MediaDevice(extractedName);
-                            audioDevices.add(currentDevice);
+                        if (lowerLine.contains("directshow audio devices") || lowerLine.contains("audio devices")) {
+                            currentSection = sectionAudio;
+                            currentDevice = null;
+                            continue;
                         }
-                        continue;
-                    }
 
-                    if (currentSection == SECTION_VIDEO) {
-                        if (seenVideoNames.add(extractedName)) {
-                            currentDevice = new MediaDevice(extractedName);
-                            videoDevices.add(currentDevice);
+                        if (!line.contains("\"")) {
+                            continue;
                         }
-                    } else if (currentSection == SECTION_AUDIO) {
-                        if (seenAudioNames.add(extractedName)) {
-                            currentDevice = new MediaDevice(extractedName);
-                            audioDevices.add(currentDevice);
+
+                        String extractedName = extractBetweenQuotes(line);
+                        if (extractedName == null) {
+                            continue;
+                        }
+
+                        if (lowerLine.contains("alternative name") && currentDevice != null) {
+                            currentDevice.setAltName(extractedName);
+                            continue;
+                        }
+
+                        if (lowerLine.contains("(video)")) {
+                            if (seenVideoNames.add(extractedName)) {
+                                currentDevice = new MediaDevice(extractedName);
+                                videoDevices.add(currentDevice);
+                            }
+                            continue;
+                        }
+                        if (lowerLine.contains("(audio)")) {
+                            if (seenAudioNames.add(extractedName)) {
+                                currentDevice = new MediaDevice(extractedName);
+                                audioDevices.add(currentDevice);
+                            }
+                            continue;
+                        }
+
+                        if (currentSection == sectionVideo) {
+                            if (seenVideoNames.add(extractedName)) {
+                                currentDevice = new MediaDevice(extractedName);
+                                videoDevices.add(currentDevice);
+                            }
+                        } else if (currentSection == sectionAudio) {
+                            if (seenAudioNames.add(extractedName)) {
+                                currentDevice = new MediaDevice(extractedName);
+                                audioDevices.add(currentDevice);
+                            }
                         }
                     }
                 }
@@ -187,12 +246,15 @@ public class HarmonyController {
                 if (!videoDevices.isEmpty()) {
                     videoDeviceComboBox.getSelectionModel().selectFirst();
                 }
-
                 if (!audioDevices.isEmpty()) {
                     audioDeviceComboBox.getSelectionModel().selectFirst();
                 }
 
-                status.setText("Devices loaded successfully. Video: " + videoDevices.size() + ", Audio: " + audioDevices.size());
+                boolean ready = !videoDevices.isEmpty() && !audioDevices.isEmpty();
+                startRecording.setDisable(!ready);
+                status.setText(ready
+                        ? "Devices loaded. Choose a camera and microphone, then click Start Recording."
+                        : "No usable camera/microphone pair was found.");
             });
 
         }, "device-loader").start();
@@ -207,118 +269,53 @@ public class HarmonyController {
         return null;
     }
 
-    private SessionConfig promptForSessionConfig() {
-        Dialog<SessionConfig> dialog = new Dialog<>();
-        dialog.setTitle("Session Configuration");
-        dialog.setHeaderText("Configure Harmony Settings");
-
-        ButtonType createButtonType = new ButtonType("Create", ButtonBar.ButtonData.OK_DONE);
-        dialog.getDialogPane().getButtonTypes().addAll(createButtonType, ButtonType.CANCEL);
-
-        Spinner<Integer> voicesSpinner = new Spinner<>(1, 8, 1);
-        Spinner<Double> mixSpinner = new Spinner<>(0.0, 1.0, 0.5, 0.1);
-        mixSpinner.setEditable(true);
-        Slider reverbSlider = new Slider(0.0, 1.0, 0.35);
-        reverbSlider.setShowTickLabels(true);
-        reverbSlider.setShowTickMarks(true);
-        reverbSlider.setMajorTickUnit(0.25);
-        reverbSlider.setMinorTickCount(4);
-        reverbSlider.setBlockIncrement(0.05);
-
-        GridPane grid = new GridPane();
-        grid.setHgap(10);
-        grid.setVgap(10);
-
-        grid.add(new Label("Voices:"), 0, 0);
-        grid.add(voicesSpinner, 1, 0);
-        grid.add(new Label("Mix:"), 0, 1);
-        grid.add(mixSpinner, 1, 1);
-        grid.add(new Label("Magical Reverb:"), 0, 2);
-        grid.add(reverbSlider, 1, 2);
-
-        dialog.getDialogPane().setContent(grid);
-
-        dialog.setResultConverter(dialogButton -> {
-            if (dialogButton == createButtonType) {
-                return new SessionConfig(
-                        voicesSpinner.getValue(),
-                        mixSpinner.getValue(),
-                        reverbSlider.getValue()
-                );
-            }
-            return null;
-        });
-
-        return dialog.showAndWait().orElse(null);
-    }
-
-    @FXML
-    protected void createSessionOnClick() {
-        SessionConfig config = promptForSessionConfig();
-
-        if (config == null) {
-            status.setText("Session creation cancelled.");
-            return;
-        }
-
-        currentSessionPath = SessionManager.createNewSession();
-        SessionManager.writeConfig(currentSessionPath, config.voices, config.mix, config.reverbIntensity);
-
-        sessionLabel.setText("Session created: " + currentSessionPath);
-        startRecording.setDisable(false);
-        stopRecording.setDisable(true);
-        saveVideoButton.setDisable(true);
-
-        hideVideoPreview();
-        showPlaceholder("Camera preview opens when recording starts", "Click Start Recording to launch the gesture feedback window.");
-        status.setText("Session ready. Click Start Recording to begin preview + capture.");
-    }
-
     @FXML
     protected void startRecordingOnClick() {
-        if (currentSessionPath == null) {
-            status.setText("Please create a session first.");
+        if (isRecording || isProcessing) {
             return;
         }
-        if (isRecording) return;
 
         MediaDevice selectedVideo = videoDeviceComboBox.getValue();
         MediaDevice selectedAudio = audioDeviceComboBox.getValue();
 
         if (selectedVideo == null || selectedAudio == null) {
-            status.setText("Error: Please select both a camera and a microphone.");
+            status.setText("Please select both a camera and a microphone.");
             return;
         }
 
-        if (!isLiveFeedbackRunning() && !startLiveFeedbackStream()) {
-            status.setText("Unable to start live feedback stream.");
+        resetPreviewForNewCapture();
+        currentSessionPath = SessionManager.createNewSession();
+        sessionLabel.setText("Current session: " + currentSessionPath + "\n" + GESTURE_GUIDE);
+
+        if (!startLiveFeedbackStream()) {
+            status.setText("Unable to start the gesture feedback pipeline.");
+            deleteCurrentSessionQuietly();
             return;
         }
 
         isRecording = true;
+        harmonizedVideoPath = null;
 
         Path sessionDir = Path.of(currentSessionPath);
         try {
             Files.createDirectories(sessionDir);
         } catch (IOException e) {
-            status.setText("Failed to create session dir");
-            e.printStackTrace();
+            status.setText("Failed to create the session directory.");
             isRecording = false;
+            stopLiveFeedbackStream();
+            deleteCurrentSessionQuietly();
             return;
         }
 
         String videoPath = sessionDir.resolve("video.mp4").toString();
-
         String primaryVideoName = selectedVideo.getAltName() != null ? selectedVideo.getAltName() : selectedVideo.toString();
         String primaryAudioName = selectedAudio.getAltName() != null ? selectedAudio.getAltName() : selectedAudio.toString();
 
         boolean started = startFfmpegRecording(buildRecordingCommand(primaryVideoName, primaryAudioName, videoPath), cameraStreamStdin);
-
         if (!started) {
             String fallbackVideo = selectedVideo.toString();
             String fallbackAudio = selectedAudio.toString();
             boolean hasDisplayNameFallback = !fallbackVideo.equals(primaryVideoName) || !fallbackAudio.equals(primaryAudioName);
-
             if (hasDisplayNameFallback) {
                 status.setText("Retrying recording with device display names...");
                 started = startFfmpegRecording(buildRecordingCommand(fallbackVideo, fallbackAudio, videoPath), cameraStreamStdin);
@@ -332,19 +329,20 @@ public class HarmonyController {
 
         if (!started) {
             stopLiveFeedbackStream();
-            status.setText("Failed to start recording. Check selected camera/microphone or ffmpeg logs.");
+            deleteCurrentSessionQuietly();
             isRecording = false;
             startRecording.setDisable(false);
             stopRecording.setDisable(true);
+            cancelRecording.setDisable(true);
+            status.setText("Failed to start recording. Check the selected devices or ffmpeg logs.");
             return;
         }
 
-        status.setText("Recording started. Gesture feedback is visible live.");
-
+        status.setText("Recording started. The gesture-feedback pipeline is now being captured.");
         startRecording.setDisable(true);
         stopRecording.setDisable(false);
+        cancelRecording.setDisable(false);
     }
-
 
     private List<String> buildRecordingCommand(String videoDeviceName, String audioDeviceName, String videoPath) {
         String safeVideoName = videoDeviceName.replace("\"", "\\\"");
@@ -376,7 +374,6 @@ public class HarmonyController {
                 "pipe:1"
         );
     }
-
 
     private boolean startFfmpegRecording(List<String> command, OutputStream previewSink) {
         cleanupFfmpegHandles();
@@ -436,7 +433,6 @@ public class HarmonyController {
 
             if (!processRef.isAlive()) {
                 List<String> tail = snapshotFfmpegLogs();
-                System.out.println("[ffmpeg] Recording process exited early. logs=" + String.join(" | ", tail));
                 reportFfmpegStartupError(tail);
                 cleanupFfmpegHandles();
                 return false;
@@ -451,7 +447,6 @@ public class HarmonyController {
             return false;
         }
     }
-
 
     private boolean containsFfmpegFrameProgress() {
         synchronized (recentFfmpegLogs) {
@@ -482,25 +477,31 @@ public class HarmonyController {
         }
         if (joined.contains("invalid argument") || joined.contains("invalid data found")) {
             status.setText("Recording failed: invalid device identifier or ffmpeg input format.");
-            return;
         }
     }
 
     @FXML
     protected void stopRecordingOnClick() {
-        if (!isRecording) return;
-        isRecording = false;
+        if (!isRecording || currentSessionPath == null) {
+            return;
+        }
 
-        status.setText("Stopping recording...");
+        isRecording = false;
+        isProcessing = true;
+        status.setText("Stopping recording and starting processing...");
         startRecording.setDisable(true);
         stopRecording.setDisable(true);
+        cancelRecording.setDisable(true);
+        showProcessingOverlay();
 
         Process process = ffmpegProcess;
         BufferedWriter stdin = ffmpegStdin;
         cleanupFfmpegHandles();
 
         if (process == null) {
-            status.setText("No active recording process.");
+            isProcessing = false;
+            hideProcessingOverlay();
+            status.setText("No active recording process was found.");
             startRecording.setDisable(false);
             return;
         }
@@ -508,6 +509,91 @@ public class HarmonyController {
         Thread finalizeThread = new Thread(() -> finalizeRecordingAndStartPipeline(process, stdin), "recording-finalizer");
         finalizeThread.setDaemon(true);
         finalizeThread.start();
+    }
+
+    @FXML
+    protected void cancelRecordingOnClick() {
+        if (!isRecording) {
+            status.setText("There is no active recording to cancel.");
+            return;
+        }
+
+        isRecording = false;
+        isProcessing = false;
+        status.setText("Recording canceled. Deleting the current session...");
+        startRecording.setDisable(false);
+        stopRecording.setDisable(true);
+        cancelRecording.setDisable(true);
+        hideProcessingOverlay();
+
+        Process process = ffmpegProcess;
+        cleanupFfmpegHandles();
+
+        if (process != null && process.isAlive()) {
+            process.destroyForcibly();
+            try {
+                process.waitFor(3, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        stopLiveFeedbackStream();
+        deleteCurrentSessionQuietly();
+        resetToIdleState("Recording canceled. The session files were deleted.");
+    }
+
+    @FXML
+    protected void saveVideoOnClick() {
+        if (harmonizedVideoPath == null || !Files.exists(harmonizedVideoPath)) {
+            status.setText("No harmonized video is available to save.");
+            return;
+        }
+
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Choose directory to save harmonized video");
+
+        Window window = status.getScene() != null ? status.getScene().getWindow() : null;
+        File selectedDir = chooser.showDialog(window);
+        if (selectedDir == null) {
+            status.setText("Save canceled.");
+            return;
+        }
+
+        try {
+            Path destination = selectedDir.toPath().resolve("harmonized_video.mp4");
+            Files.copy(harmonizedVideoPath, destination, StandardCopyOption.REPLACE_EXISTING);
+            status.setText("Saved harmonized video to " + destination + ".");
+        } catch (IOException e) {
+            status.setText("Failed to save harmonized video.");
+        }
+    }
+
+    @FXML
+    protected void playPauseOnClick() {
+        if (previewMediaPlayer == null) {
+            return;
+        }
+
+        MediaPlayer.Status playerStatus = previewMediaPlayer.getStatus();
+        if (playerStatus == MediaPlayer.Status.PLAYING) {
+            previewMediaPlayer.pause();
+            playPauseButton.setText("Play");
+        } else {
+            previewMediaPlayer.play();
+            playPauseButton.setText("Pause");
+        }
+    }
+
+    @FXML
+    protected void replayOnClick() {
+        if (previewMediaPlayer == null) {
+            return;
+        }
+
+        previewMediaPlayer.seek(javafx.util.Duration.ZERO);
+        previewMediaPlayer.play();
+        playPauseButton.setText("Pause");
     }
 
     private void finalizeRecordingAndStartPipeline(Process process, BufferedWriter stdin) {
@@ -527,17 +613,23 @@ public class HarmonyController {
 
             if (process.isAlive()) {
                 Platform.runLater(() -> {
-                    status.setText("Recording stop timed out; process may still be alive.");
+                    isProcessing = false;
+                    hideProcessingOverlay();
+                    status.setText("Recording stop timed out; the process may still be alive.");
                     startRecording.setDisable(false);
                     stopRecording.setDisable(true);
                 });
                 return;
             }
 
-            Path recordedVideo = Path.of(currentSessionPath).resolve("video.mp4");
-            if (!waitForRecordedVideoReady(recordedVideo, exitCode)) {
+            Path sessionDir = Path.of(currentSessionPath);
+            Path recordedVideo = sessionDir.resolve("video.mp4");
+            Path previewCapture = sessionDir.resolve("preview_capture.mp4");
+            if (!waitForRecordedVideoReady(recordedVideo, exitCode) || !waitForPreviewCaptureReady(previewCapture)) {
                 Platform.runLater(() -> {
-                    status.setText("Recording stopped, but video file is incomplete. Please record again.");
+                    isProcessing = false;
+                    hideProcessingOverlay();
+                    status.setText("Recording stopped, but the captured video is incomplete. Please record again.");
                     startRecording.setDisable(false);
                     stopRecording.setDisable(true);
                 });
@@ -550,6 +642,8 @@ public class HarmonyController {
         } catch (Exception e) {
             e.printStackTrace();
             Platform.runLater(() -> {
+                isProcessing = false;
+                hideProcessingOverlay();
                 status.setText("Error stopping recording: " + e.getMessage());
                 startRecording.setDisable(false);
                 stopRecording.setDisable(true);
@@ -564,7 +658,6 @@ public class HarmonyController {
             stopLiveFeedbackStream();
         }
     }
-
 
     private boolean waitForRecordedVideoReady(Path recordedVideo, int recordingExitCode) {
         if (!Files.exists(recordedVideo)) {
@@ -601,7 +694,6 @@ public class HarmonyController {
                     stableCount = 0;
                 }
                 lastSize = currentSize;
-
                 Thread.sleep(500);
             } catch (Exception e) {
                 return false;
@@ -609,6 +701,22 @@ public class HarmonyController {
         }
 
         return isVideoContainerReadable(recordedVideo) || stableCount >= 2;
+    }
+
+    private boolean waitForPreviewCaptureReady(Path previewCapture) {
+        long deadline = System.currentTimeMillis() + 10000;
+        while (System.currentTimeMillis() < deadline) {
+            if (isVideoContainerReadable(previewCapture)) {
+                return true;
+            }
+            try {
+                Thread.sleep(400);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return isVideoContainerReadable(previewCapture);
     }
 
     private boolean isVideoContainerReadable(Path recordedVideo) {
@@ -654,11 +762,9 @@ public class HarmonyController {
                 process.destroyForcibly();
                 return false;
             }
-
             if (process.exitValue() != 0) {
                 return false;
             }
-
             if (output == null || output.isBlank()) {
                 return true;
             }
@@ -670,33 +776,6 @@ public class HarmonyController {
             }
         } catch (Exception ignored) {
             return false;
-        }
-    }
-
-    @FXML
-    protected void saveVideoOnClick() {
-        if (harmonizedVideoPath == null || !Files.exists(harmonizedVideoPath)) {
-            status.setText("No harmonized video available to save.");
-            return;
-        }
-
-        DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle("Choose directory to save harmonized video");
-
-        Window window = status.getScene() != null ? status.getScene().getWindow() : null;
-        File selectedDir = chooser.showDialog(window);
-        if (selectedDir == null) {
-            status.setText("Save cancelled.");
-            return;
-        }
-
-        try {
-            Path destination = selectedDir.toPath().resolve("harmonized_video.mp4");
-            Files.copy(harmonizedVideoPath, destination, StandardCopyOption.REPLACE_EXISTING);
-            status.setText("Saved: " + destination);
-        } catch (IOException e) {
-            status.setText("Failed to save harmonized video.");
-            e.printStackTrace();
         }
     }
 
@@ -741,21 +820,16 @@ public class HarmonyController {
             cameraStreamLogThread.start();
 
             Thread.sleep(800);
-            if (!cameraStreamProcess.isAlive()) {
-                status.setText("Failed to launch preview window.");
+            if (!isLiveFeedbackRunning()) {
+                status.setText("Failed to launch the gesture feedback window.");
                 return false;
             }
 
-            Platform.runLater(() -> {
-                feedbackImageView.setVisible(false);
-                feedbackImageView.setManaged(false);
-                previewPlaceholder.setVisible(true);
-                previewPlaceholder.setManaged(true);
-            });
+            Platform.runLater(this::showPlaceholderImage);
             return true;
         } catch (Exception e) {
             e.printStackTrace();
-            status.setText("Failed to launch Python preview process.");
+            status.setText("Failed to launch the Python preview process.");
             return false;
         }
     }
@@ -788,17 +862,14 @@ public class HarmonyController {
         }
 
         cameraStreamLogThread = null;
-        Platform.runLater(() -> feedbackImageView.setImage(null));
     }
 
     private void runPostProcessingPipeline() {
-        showProcessingOverlay();
+        updateProcessingMessage("Validating real-time timeline...");
 
         Thread pipelineThread = new Thread(() -> {
             try {
                 Path sessionDir = Path.of(currentSessionPath);
-
-                updateProcessingMessage("Validating real-time timeline...");
                 ensureFileExists(sessionDir.resolve("timeline.json"), "Timeline was not generated during recording");
 
                 updateProcessingMessage("Extracting clean audio for harmony blending...");
@@ -808,38 +879,41 @@ public class HarmonyController {
                 }
                 ensureFileExists(Path.of(extractedWav), "Extracted wav file missing");
 
-                updateProcessingMessage("Generating harmonized audio...");
+                updateProcessingMessage("Generating harmonized audio for the new 1 / 2m / 3m / 4 gesture map...");
                 new PythonRunner().runHarmonizeAudio(currentSessionPath);
                 Path harmonizedAudio = resolveHarmonizedAudio(sessionDir);
                 ensureFileExists(harmonizedAudio, "Harmonized audio was not generated");
 
-                updateProcessingMessage("Merging recorded video with harmonized audio...");
+                updateProcessingMessage("Merging the captured gesture-feedback video with harmonized audio...");
                 Path outputVideo = muxFinalVideo(sessionDir);
                 harmonizedVideoPath = outputVideo;
 
                 Platform.runLater(() -> {
+                    isProcessing = false;
                     hideProcessingOverlay();
                     showVideoPreview(outputVideo);
                     saveVideoButton.setDisable(false);
                     startRecording.setDisable(false);
                     stopRecording.setDisable(true);
-                    status.setText("Processing complete! Preview the harmonized result, then save if satisfied.");
+                    cancelRecording.setDisable(true);
+                    status.setText("Processing complete. Review the harmonized video, then save it if you want.");
                 });
             } catch (Exception e) {
+                e.printStackTrace();
                 Platform.runLater(() -> {
+                    isProcessing = false;
                     hideProcessingOverlay();
                     startRecording.setDisable(false);
                     stopRecording.setDisable(true);
+                    cancelRecording.setDisable(true);
                     status.setText("Background processing failed: " + e.getMessage());
                 });
-                e.printStackTrace();
             }
         }, "post-process-pipeline");
 
         pipelineThread.setDaemon(true);
         pipelineThread.start();
     }
-
 
     private void ensureFileExists(Path path, String message) throws IOException {
         if (!Files.exists(path) || Files.size(path) == 0) {
@@ -848,13 +922,9 @@ public class HarmonyController {
     }
 
     private Path muxFinalVideo(Path sessionDir) throws IOException, InterruptedException {
-        Path inputVideo = sessionDir.resolve("video.mp4");
+        Path inputVideo = resolvePreviewVideo(sessionDir);
         Path harmonizedAudio = resolveHarmonizedAudio(sessionDir);
         Path finalVideo = sessionDir.resolve("harmonized_video.mp4");
-
-        if (!Files.exists(inputVideo)) {
-            throw new IOException("Recorded video not found: " + inputVideo);
-        }
 
         List<String> copyMuxCommand = List.of(
                 "ffmpeg", "-y",
@@ -872,8 +942,6 @@ public class HarmonyController {
         if (copyResult.exitCode == 0 && Files.exists(finalVideo)) {
             return finalVideo;
         }
-
-        System.out.println("[ffmpeg-mux] Copy mux failed, retrying with video re-encode...");
 
         List<String> transcodeMuxCommand = List.of(
                 "ffmpeg", "-y",
@@ -894,13 +962,28 @@ public class HarmonyController {
         if (transcodeResult.exitCode != 0 || !Files.exists(finalVideo)) {
             String copyTail = copyResult.recentLogs.stream().collect(Collectors.joining(" | "));
             String transcodeTail = transcodeResult.recentLogs.stream().collect(Collectors.joining(" | "));
-            throw new IOException("Failed to build harmonized video preview. copyExit=" + copyResult.exitCode
+            throw new IOException("Failed to build the harmonized video preview. copyExit=" + copyResult.exitCode
                     + ", transcodeExit=" + transcodeResult.exitCode
                     + ", copyLogs=" + copyTail
                     + ", transcodeLogs=" + transcodeTail);
         }
 
         return finalVideo;
+    }
+
+    private Path resolvePreviewVideo(Path sessionDir) throws IOException {
+        List<Path> candidates = List.of(
+                sessionDir.resolve("preview_capture.mp4"),
+                sessionDir.resolve("video.mp4")
+        );
+
+        for (Path candidate : candidates) {
+            if (Files.exists(candidate) && Files.size(candidate) > 0) {
+                return candidate;
+            }
+        }
+
+        throw new IOException("No captured preview video was found. Expected one of: " + candidates);
     }
 
     private Path resolveHarmonizedAudio(Path sessionDir) throws IOException {
@@ -953,46 +1036,41 @@ public class HarmonyController {
     private void showVideoPreview(Path videoPath) {
         stopPreviewPlayer();
 
-        feedbackImageView.setVisible(false);
-        feedbackImageView.setManaged(false);
-        previewPlaceholder.setVisible(false);
-        previewPlaceholder.setManaged(false);
+        previewImageView.setVisible(false);
+        previewImageView.setManaged(false);
         outputMediaView.setVisible(true);
         outputMediaView.setManaged(true);
 
         Media media = new Media(videoPath.toUri().toString());
         previewMediaPlayer = new MediaPlayer(media);
         previewMediaPlayer.setAutoPlay(true);
+        previewMediaPlayer.setOnPlaying(() -> playPauseButton.setText("Pause"));
+        previewMediaPlayer.setOnPaused(() -> playPauseButton.setText("Play"));
+        previewMediaPlayer.setOnEndOfMedia(() -> playPauseButton.setText("Play"));
         outputMediaView.setMediaPlayer(previewMediaPlayer);
 
         previewActions.setVisible(true);
         previewActions.setManaged(true);
+        playPauseButton.setDisable(false);
+        replayButton.setDisable(false);
     }
 
-    private void hideVideoPreview() {
+    private void showPlaceholderImage() {
         stopPreviewPlayer();
         outputMediaView.setVisible(false);
         outputMediaView.setManaged(false);
+        previewImageView.setVisible(true);
+        previewImageView.setManaged(true);
         previewActions.setVisible(false);
         previewActions.setManaged(false);
     }
 
-    private void showPlaceholder(String title, String subtitle) {
-        hideVideoPreview();
-        feedbackImageView.setVisible(false);
-        feedbackImageView.setManaged(false);
-
-        if (!previewPlaceholder.getChildren().isEmpty() && previewPlaceholder.getChildren().size() >= 2) {
-            if (previewPlaceholder.getChildren().get(0) instanceof Label titleLabel) {
-                titleLabel.setText(title);
-            }
-            if (previewPlaceholder.getChildren().get(1) instanceof Label subtitleLabel) {
-                subtitleLabel.setText(subtitle);
-            }
-        }
-
-        previewPlaceholder.setVisible(true);
-        previewPlaceholder.setManaged(true);
+    private void resetPreviewForNewCapture() {
+        harmonizedVideoPath = null;
+        saveVideoButton.setDisable(true);
+        playPauseButton.setDisable(true);
+        replayButton.setDisable(true);
+        showPlaceholderImage();
     }
 
     private void stopPreviewPlayer() {
@@ -1002,6 +1080,7 @@ public class HarmonyController {
             previewMediaPlayer = null;
         }
         outputMediaView.setMediaPlayer(null);
+        playPauseButton.setText("Pause");
     }
 
     private void showProcessingOverlay() {
@@ -1022,8 +1101,35 @@ public class HarmonyController {
         Platform.runLater(() -> processingMessage.setText(message));
     }
 
+    private void deleteCurrentSessionQuietly() {
+        if (currentSessionPath == null || currentSessionPath.isBlank()) {
+            currentSessionPath = null;
+            return;
+        }
+
+        Path sessionDir = Path.of(currentSessionPath);
+        try (Stream<Path> walk = Files.walk(sessionDir)) {
+            walk.sorted((a, b) -> b.compareTo(a)).forEach(path -> {
+                try {
+                    Files.deleteIfExists(path);
+                } catch (IOException ignored) {
+                }
+            });
+        } catch (IOException ignored) {
+        }
+        currentSessionPath = null;
+    }
+
+    private void resetToIdleState(String statusMessage) {
+        sessionLabel.setText(GESTURE_GUIDE + " Recording captures the gesture-feedback window output.");
+        resetPreviewForNewCapture();
+        hideProcessingOverlay();
+        status.setText(statusMessage);
+    }
+
     public void shutdown() {
         isRecording = false;
+        isProcessing = false;
         if (ffmpegProcess != null && ffmpegProcess.isAlive()) {
             ffmpegProcess.destroyForcibly();
         }
