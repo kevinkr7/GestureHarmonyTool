@@ -17,7 +17,7 @@ class TimelineEngine:
         self.min_segment_s = min_segment_s
         self.stable_s = stable_ms / 1000.0
         self.segments: list[Segment] = []
-        self.current_degree = "ROOT"
+        self.current_degree = "ONE"
         self.current_start = 0.0
         self.pending_degree: str | None = None
         self.pending_since: float = 0.0
@@ -60,7 +60,7 @@ class TimelineEngine:
             merged.append({"start": start, "end": end, "degree": seg.degree})
 
         if not merged:
-            merged = [{"start": 0.0, "end": max(0.5, round(end_ts, 3)), "degree": "ROOT"}]
+            merged = [{"start": 0.0, "end": max(0.5, round(end_ts, 3)), "degree": "ONE"}]
         return merged
 
     def write(self, out_path: Path, end_ts: float) -> list[dict]:

@@ -26,7 +26,7 @@ try:
 except ImportError:  # pragma: no cover
     pretty_midi = None
 
-VALID_DEGREES = {"ROOT", "FIRST_INV", "THIRD_INV"}
+VALID_DEGREES = {"ONE", "TWO_MINOR", "THREE_MINOR", "FOUR"}
 
 def detect_song_key(audio_path: Path) -> tuple[int, str]:
     """Analyzes audio to detect the root MIDI note and scale type (major/minor)."""
@@ -66,7 +66,7 @@ def normalize_timeline_segments(raw_timeline, min_duration: float = 0.05) -> lis
     for seg in raw_timeline:
         start = float(seg.get("start", 0.0))
         end = float(seg.get("end", start))
-        degree = str(seg.get("degree", "ROOT")).upper()
+        degree = str(seg.get("degree", "ONE")).upper()
 
         if degree not in VALID_DEGREES and degree != "MUTE":
             degree = "MUTE"
@@ -142,19 +142,13 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str, root
     midi = pretty_midi.PrettyMIDI()
     instrument = pretty_midi.Instrument(program=0, name="GestureHarmonyChords")
 
-    # Dynamically set the chord intervals based on the detected scale
-    if scale_type == "minor":
-        inversion_map = {
-            "ROOT": [0, 3, 7],         # Root, Minor 3rd, 5th
-            "FIRST_INV": [3, 7, 12],   # Minor 3rd, 5th, Root(+Octave)
-            "THIRD_INV": [7, 12, 15],  # 5th, Root(+Octave), Minor 3rd(+Octave)
-        }
-    else:
-        inversion_map = {
-            "ROOT": [0, 4, 7],         # Root, Major 3rd, 5th
-            "FIRST_INV": [4, 7, 12],   # Major 3rd, 5th, Root(+Octave)
-            "THIRD_INV": [7, 12, 16],  # 5th, Root(+Octave), Major 3rd(+Octave)
-        }
+    tonic_third = 3 if scale_type == "minor" else 4
+    chord_map = {
+        "ONE": [0, tonic_third, 7],
+        "TWO_MINOR": [2, 5, 9],
+        "THREE_MINOR": [4, 7, 11],
+        "FOUR": [5, 9, 12],
+    }
 
     for idx, block in enumerate(sounding_blocks):
         next_block = sounding_blocks[idx + 1] if idx + 1 < len(sounding_blocks) else None
@@ -168,7 +162,7 @@ def generate_chord_midi(timeline_path: Path | str, output_midi: Path | str, root
             pretty_midi.ControlChange(number=64, value=0, time=max(block["start"] + 0.001, pedal_end))
         )
 
-        intervals = inversion_map.get(block["degree"], inversion_map["ROOT"])
+        intervals = chord_map.get(block["degree"], chord_map["ONE"])
         for interval in intervals:
             note = pretty_midi.Note(
                 velocity=96,
