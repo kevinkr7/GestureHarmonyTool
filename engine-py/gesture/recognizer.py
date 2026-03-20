@@ -27,7 +27,7 @@ class GestureRecognizer:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.hands.process(rgb)
         if not results.multi_hand_landmarks:
-            return self._smooth("MUTE")
+            return self._smooth("ONE")
 
         hand = results.multi_hand_landmarks[0]
         mp_draw.draw_landmarks(frame, hand, mp_hands.HAND_CONNECTIONS)
@@ -63,19 +63,12 @@ class GestureRecognizer:
         }
 
     def _map_gesture(self, states: dict[str, bool]) -> str:
-        # Restrict gesture control to chord inversion selection only.
-        # Root position: only index finger up.
-        root = states["index"] and not states["middle"] and not states["ring"] and not states["pinky"]
-        # First inversion: index + middle fingers up.
-        first_inv = states["index"] and states["middle"] and not states["ring"] and not states["pinky"]
-        # Third-requested inversion mode (implemented as second inversion for triads):
-        # index + middle + ring fingers up.
-        third_inv = states["index"] and states["middle"] and states["ring"] and not states["pinky"]
+        visible_count = sum(1 for finger in ("index", "middle", "ring", "pinky") if states[finger])
 
-        if root:
-            return "ROOT"
-        if first_inv:
-            return "FIRST_INV"
-        if third_inv:
-            return "THIRD_INV"
-        return "ROOT"
+        if visible_count <= 1:
+            return "ONE"
+        if visible_count == 2:
+            return "TWO_MINOR"
+        if visible_count == 3:
+            return "THREE_MINOR"
+        return "FOUR"

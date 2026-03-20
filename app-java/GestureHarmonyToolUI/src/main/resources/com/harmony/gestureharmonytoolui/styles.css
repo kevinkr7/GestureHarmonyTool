@@ -10,34 +10,22 @@
 
 .session-pill {
     -fx-text-fill: #cbd5e1;
-    -fx-background-color: rgba(30, 41, 59, 0.8);
+    -fx-background-color: rgba(30, 41, 59, 0.82);
     -fx-padding: 10 16;
     -fx-background-radius: 999;
 }
 
 .preview-wrapper {
-    -fx-background-color: rgba(15, 23, 42, 0.75);
+    -fx-background-color: rgba(15, 23, 42, 0.78);
     -fx-border-color: rgba(148, 163, 184, 0.35);
     -fx-border-width: 1;
     -fx-border-radius: 18;
     -fx-background-radius: 18;
+    -fx-padding: 10;
 }
 
-.preview-placeholder {
-    -fx-background-color: linear-gradient(to bottom right, rgba(51,65,85,0.65), rgba(30,41,59,0.65));
-    -fx-background-radius: 14;
-    -fx-padding: 24;
-}
-
-.placeholder-title {
-    -fx-text-fill: #e2e8f0;
-    -fx-font-size: 22px;
-    -fx-font-weight: 600;
-}
-
-.placeholder-subtitle {
-    -fx-text-fill: #94a3b8;
-    -fx-font-size: 14px;
+.preview-image {
+    -fx-effect: dropshadow(gaussian, rgba(15, 23, 42, 0.4), 24, 0.2, 0, 10);
 }
 
 .combo-box {
@@ -81,7 +69,7 @@
 }
 
 .processing-overlay {
-    -fx-background-color: rgba(2, 6, 23, 0.8);
+    -fx-background-color: rgba(2, 6, 23, 0.58);
     -fx-background-radius: 14;
     -fx-padding: 18;
 }

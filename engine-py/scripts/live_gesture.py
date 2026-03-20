@@ -19,6 +19,12 @@ from timeline.engine import TimelineEngine
 from utils.logging_utils import configure_logging
 
 log = configure_logging("live_gesture")
+GESTURE_LABELS = {
+    "ONE": "1",
+    "TWO_MINOR": "2m",
+    "THREE_MINOR": "3m",
+    "FOUR": "4",
+}
 
 
 def decode_mjpeg_frames(stream) -> "tuple[np.ndarray, bool]":
@@ -48,6 +54,23 @@ def decode_mjpeg_frames(stream) -> "tuple[np.ndarray, bool]":
     yield np.empty((0, 0, 3), dtype=np.uint8), True
 
 
+def open_preview_writer(session_path: Path, width: int, height: int):
+    output_path = session_path / "preview_capture.mp4"
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(str(output_path), fourcc, 30.0, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"Unable to open preview writer at {output_path}")
+    return writer
+
+
+def decorate_frame(frame: np.ndarray, degree: str) -> np.ndarray:
+    display_degree = GESTURE_LABELS.get(degree, "1")
+    cv2.rectangle(frame, (18, 18), (560, 138), (7, 12, 25), -1)
+    cv2.putText(frame, f"Detected chord: {display_degree}", (34, 72), cv2.FONT_HERSHEY_SIMPLEX, 1.05, (102, 252, 241), 3)
+    cv2.putText(frame, "Gesture map: 1 | 2m | 3m | 4", (34, 118), cv2.FONT_HERSHEY_SIMPLEX, 0.82, (226, 232, 240), 2)
+    return frame
+
+
 def preview_mode(session_path: Path) -> int:
     recognizer = GestureRecognizer(window_size=8)
     timeline = TimelineEngine(min_segment_s=0.3, stable_ms=200.0)
@@ -56,6 +79,7 @@ def preview_mode(session_path: Path) -> int:
 
     start = time.monotonic()
     last_flush = 0.0
+    writer = None
 
     cv2.namedWindow("Gesture Feedback", cv2.WINDOW_NORMAL)
 
@@ -64,12 +88,16 @@ def preview_mode(session_path: Path) -> int:
             if eof:
                 break
 
+            if writer is None:
+                height, width = frame.shape[:2]
+                writer = open_preview_writer(session_path, width, height)
+
             degree = recognizer.detect(frame)
             ts = max(0.0, time.monotonic() - start)
             timeline.update(degree, ts)
 
-            cv2.rectangle(frame, (20, 20), (420, 110), (0, 0, 0), -1)
-            cv2.putText(frame, f"Inversion: {degree}", (30, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
+            decorate_frame(frame, degree)
+            writer.write(frame)
             cv2.imshow("Gesture Feedback", frame)
 
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -81,6 +109,8 @@ def preview_mode(session_path: Path) -> int:
     finally:
         end_ts = max(0.0, time.monotonic() - start)
         timeline.write(timeline_path, end_ts)
+        if writer is not None:
+            writer.release()
         recognizer.close()
         cv2.destroyAllWindows()
 
@@ -109,7 +139,7 @@ def main() -> int:
     out = Path(session) / "timeline.json"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps([{"start": 0.0, "end": 1.0, "degree": "ROOT"}], indent=2), encoding="utf-8")
+        out.write_text(json.dumps([{"start": 0.0, "end": 1.0, "degree": "ONE"}], indent=2), encoding="utf-8")
     return 0
 
 

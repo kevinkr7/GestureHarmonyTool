@@ -5,10 +5,10 @@
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ProgressIndicator?>
+<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
-<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.media.MediaView?>
 
 <VBox alignment="TOP_CENTER" spacing="16.0"
@@ -21,16 +21,11 @@
     </padding>
 
     <Label text="Gesture Harmony Studio" styleClass="app-title"/>
-    <Label fx:id="sessionLabel" text="Create a session to start your live camera preview." styleClass="session-pill" wrapText="true"/>
+    <Label fx:id="sessionLabel" text="Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4." styleClass="session-pill" wrapText="true"/>
 
     <StackPane prefWidth="920.0" prefHeight="520.0" styleClass="preview-wrapper">
-        <ImageView fx:id="feedbackImageView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
+        <ImageView fx:id="previewImageView" fitWidth="900.0" fitHeight="500.0" preserveRatio="true" styleClass="preview-image"/>
         <MediaView fx:id="outputMediaView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
-
-        <VBox fx:id="previewPlaceholder" alignment="CENTER" spacing="12.0" styleClass="preview-placeholder">
-            <Label text="Live camera preview will appear here" styleClass="placeholder-title"/>
-            <Label text="Click Create Session and allow camera permission when prompted." styleClass="placeholder-subtitle"/>
-        </VBox>
 
         <VBox fx:id="processingOverlay" alignment="CENTER" spacing="10.0" styleClass="processing-overlay" visible="false" managed="false">
             <ProgressIndicator prefWidth="64.0" prefHeight="64.0"/>
@@ -45,12 +40,14 @@
     </HBox>
 
     <HBox spacing="15.0" alignment="CENTER">
-        <Button fx:id="createSession" text="Create Session" onAction="#createSessionOnClick" styleClass="primary-button"/>
-        <Button fx:id="startRecording" text="Start Recording" disable="true" onAction="#startRecordingOnClick" styleClass="secondary-button"/>
-        <Button fx:id="stopRecording" text="Stop Recording" disable="true" onAction="#stopRecordingOnClick" styleClass="danger-button"/>
+        <Button fx:id="startRecording" text="Start Recording" onAction="#startRecordingOnClick" styleClass="primary-button"/>
+        <Button fx:id="stopRecording" text="Stop Recording" disable="true" onAction="#stopRecordingOnClick" styleClass="secondary-button"/>
+        <Button fx:id="cancelRecording" text="Cancel Recording" disable="true" onAction="#cancelRecordingOnClick" styleClass="danger-button"/>
     </HBox>
 
     <HBox fx:id="previewActions" spacing="12.0" alignment="CENTER" visible="false" managed="false">
+        <Button fx:id="playPauseButton" text="Pause" disable="true" onAction="#playPauseOnClick" styleClass="secondary-button"/>
+        <Button fx:id="replayButton" text="Replay" disable="true" onAction="#replayOnClick" styleClass="secondary-button"/>
         <Button fx:id="saveVideoButton" text="Save Harmonized Video" disable="true" onAction="#saveVideoOnClick" styleClass="primary-button"/>
     </HBox>
 
