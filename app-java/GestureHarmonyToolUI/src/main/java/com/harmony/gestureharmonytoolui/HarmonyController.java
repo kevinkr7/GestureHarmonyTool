@@ -10,14 +10,17 @@ import javafx.scene.control.ComboBox;
 import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
-import javafx.scene.image.ImageView;
-import javafx.scene.image.PixelWriter;
-import javafx.scene.image.WritableImage;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.Pane;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
 import javafx.scene.paint.Color;
+import javafx.scene.paint.CycleMethod;
+import javafx.scene.paint.RadialGradient;
+import javafx.scene.paint.Stop;
+import javafx.scene.shape.Circle;
+import javafx.scene.effect.DropShadow;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.Window;
 
@@ -43,6 +46,8 @@ public class HarmonyController {
     private static final String GESTURE_GUIDE = "Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4.";
     private static final String MANUAL_CHORDS_CONFIG = "chord_preferences.json";
     private static final List<String> GESTURE_CODES = List.of("ONE", "TWO_MINOR", "THREE_MINOR", "FOUR");
+    private static final int PLACEHOLDER_WIDTH = 900;
+    private static final int PLACEHOLDER_HEIGHT = 500;
 
     private String currentSessionPath;
     private boolean isRecording;
@@ -58,9 +63,11 @@ public class HarmonyController {
 
     private MediaPlayer previewMediaPlayer;
     private Path harmonizedVideoPath;
-    private WritableImage placeholderImage;
     private AnimationTimer placeholderAnimationTimer;
     private long placeholderAnimationStartNanos = -1L;
+    private final List<Circle> placeholderParticles = new ArrayList<>();
+    private final List<PlaceholderParticleMotion> placeholderParticleMotions = new ArrayList<>();
+    private boolean manualChordSelectionsTouched;
 
     @FXML private Label sessionLabel;
     @FXML private Label status;
@@ -77,7 +84,7 @@ public class HarmonyController {
     @FXML private ComboBox<MediaDevice> videoDeviceComboBox;
     @FXML private ComboBox<MediaDevice> audioDeviceComboBox;
 
-    @FXML private ImageView previewImageView;
+    @FXML private Pane placeholderPane;
     @FXML private MediaView outputMediaView;
 
     private enum ChordMode {
@@ -85,11 +92,14 @@ public class HarmonyController {
         MANUAL
     }
 
-    private record ChordOption(String label, List<Integer> intervals) {
+    private record ChordOption(String label, int rootSemitone, List<Integer> intervals) {
         @Override
         public String toString() {
             return label;
         }
+    }
+
+    private record ChordQuality(String label, List<Integer> intervals) {
     }
 
     private record KeyOption(String label, int rootNote, String scaleType) {
@@ -100,6 +110,17 @@ public class HarmonyController {
     }
 
     private record RecordingChordConfig(ChordMode mode, KeyOption key, Map<String, ChordOption> mappings) {
+    }
+
+    private record PlaceholderParticleMotion(
+            double amplitudeX,
+            double amplitudeY,
+            double frequencyX,
+            double frequencyY,
+            double phase,
+            double driftX,
+            double driftY
+    ) {
     }
 
     public static class MediaDevice {
@@ -136,11 +157,15 @@ public class HarmonyController {
     }
 
     private void loadPlaceholderImage() {
-        int width = 1280;
-        int height = 720;
-        placeholderImage = new WritableImage(width, height);
-        previewImageView.setImage(placeholderImage);
-        renderPlaceholderFrame(0.0);
+        placeholderPane.setPrefSize(PLACEHOLDER_WIDTH, PLACEHOLDER_HEIGHT);
+        placeholderPane.setMinSize(PLACEHOLDER_WIDTH, PLACEHOLDER_HEIGHT);
+        placeholderPane.setMaxSize(PLACEHOLDER_WIDTH, PLACEHOLDER_HEIGHT);
+        placeholderPane.getChildren().clear();
+        placeholderParticles.clear();
+        placeholderParticleMotions.clear();
+
+        createPlaceholderParticles();
+        updatePlaceholderAnimation(0.0);
         startPlaceholderAnimation();
     }
 
@@ -156,94 +181,92 @@ public class HarmonyController {
                     placeholderAnimationStartNanos = now;
                 }
                 double elapsedSeconds = (now - placeholderAnimationStartNanos) / 1_000_000_000.0;
-                if (previewImageView.isVisible()) {
-                    renderPlaceholderFrame(elapsedSeconds);
+                if (placeholderPane.isVisible()) {
+                    updatePlaceholderAnimation(elapsedSeconds);
                 }
             }
         };
         placeholderAnimationTimer.start();
     }
 
-    private void renderPlaceholderFrame(double timeSeconds) {
-        if (placeholderImage == null) {
-            return;
-        }
-
-        int width = (int) placeholderImage.getWidth();
-        int height = (int) placeholderImage.getHeight();
-        PixelWriter writer = placeholderImage.getPixelWriter();
-
-        double centerX = width * 0.5;
-        double centerY = height * 0.5;
-        double time = timeSeconds * 0.65;
-
-        double[][] particles = {
-                {0.17, 0.86, 1.8, 3.2, 0.7, 0.50, 22},
-                {0.38, 0.78, 2.6, 2.1, 1.9, 0.64, 18},
-                {0.69, 0.82, 3.4, 1.6, 2.7, 0.74, 24},
-                {0.88, 0.74, 1.9, 4.1, 3.6, 0.58, 20},
-                {0.54, 0.92, 2.1, 2.8, 4.3, 0.69, 26},
-                {0.25, 0.68, 4.3, 1.3, 5.1, 0.43, 16}
+    private void createPlaceholderParticles() {
+        Color[] palette = {
+                Color.web("#22d3ee", 0.90),
+                Color.web("#38bdf8", 0.88),
+                Color.web("#818cf8", 0.82),
+                Color.web("#a78bfa", 0.80),
+                Color.web("#f472b6", 0.76),
+                Color.web("#f8fafc", 0.68)
         };
 
-        double[] orbitX = new double[particles.length];
-        double[] orbitY = new double[particles.length];
-        double[] radius = new double[particles.length];
+        double[][] motionPresets = {
+                {180, 84, 0.58, 0.34, 0.4, 0.12, -0.06},
+                {210, 118, 0.42, 0.49, 1.1, -0.08, 0.07},
+                {260, 96, 0.63, 0.28, 1.9, 0.05, 0.10},
+                {150, 132, 0.55, 0.41, 2.6, -0.11, 0.04},
+                {310, 74, 0.36, 0.60, 3.1, 0.10, -0.09},
+                {230, 144, 0.47, 0.37, 3.8, -0.06, -0.05},
+                {125, 88, 0.79, 0.52, 4.4, 0.08, 0.03},
+                {280, 108, 0.31, 0.45, 5.0, -0.04, 0.08},
+                {190, 68, 0.67, 0.33, 5.6, 0.06, -0.02},
+                {340, 152, 0.28, 0.22, 6.2, -0.03, 0.06}
+        };
 
-        for (int i = 0; i < particles.length; i++) {
-            double[] particle = particles[i];
-            orbitX[i] = centerX
-                    + Math.sin(time * particle[2] + particle[4]) * width * particle[0] * 0.38
-                    + Math.cos(time * (particle[3] * 0.58) - particle[4]) * width * 0.09;
-            orbitY[i] = centerY
-                    + Math.cos(time * particle[3] + particle[4]) * height * particle[1] * 0.26
-                    + Math.sin(time * (particle[2] * 0.72) + particle[4]) * height * 0.08;
-            radius[i] = particle[6];
+        for (int i = 0; i < motionPresets.length; i++) {
+            double radius = 10 + (i % 4) * 4;
+            Color color = palette[i % palette.length];
+            Circle particle = new Circle(radius);
+            particle.setManaged(false);
+            particle.setMouseTransparent(true);
+            particle.setFill(new RadialGradient(
+                    0,
+                    0,
+                    0.35,
+                    0.35,
+                    1,
+                    true,
+                    CycleMethod.NO_CYCLE,
+                    new Stop(0.0, color),
+                    new Stop(0.45, color.deriveColor(0, 1, 1, 0.55)),
+                    new Stop(1.0, Color.TRANSPARENT)
+            ));
+            particle.setEffect(new DropShadow(radius * 1.35, color.deriveColor(0, 1, 1, 0.45)));
+
+            placeholderParticles.add(particle);
+            placeholderParticleMotions.add(new PlaceholderParticleMotion(
+                    motionPresets[i][0],
+                    motionPresets[i][1],
+                    motionPresets[i][2],
+                    motionPresets[i][3],
+                    motionPresets[i][4],
+                    motionPresets[i][5],
+                    motionPresets[i][6]
+            ));
+            placeholderPane.getChildren().add(particle);
         }
+    }
 
-        for (int y = 0; y < height; y++) {
-            double normalizedY = (y - centerY) / height;
-            for (int x = 0; x < width; x++) {
-                double normalizedX = (x - centerX) / width;
-                double radial = Math.hypot(normalizedX * 1.12, normalizedY * 0.9);
+    private void updatePlaceholderAnimation(double timeSeconds) {
+        double centerX = PLACEHOLDER_WIDTH * 0.5;
+        double centerY = PLACEHOLDER_HEIGHT * 0.5;
+        double time = timeSeconds * 0.92;
 
-                double waveA = Math.sin((normalizedX * 14.0) + (time * 1.8));
-                double waveB = Math.cos((normalizedY * 18.0) - (time * 1.35));
-                double waveC = Math.sin(((normalizedX + normalizedY) * 24.0) + (time * 2.25));
-                double lattice = Math.sin((normalizedX * normalizedX * 52.0) - (time * 0.95))
-                        + Math.cos((normalizedY * normalizedY * 44.0) + (time * 1.2));
+        for (int i = 0; i < placeholderParticles.size(); i++) {
+            Circle particle = placeholderParticles.get(i);
+            PlaceholderParticleMotion motion = placeholderParticleMotions.get(i);
 
-                double field = 0.5 + 0.5 * Math.sin((waveA + waveB + waveC) * 0.85 + lattice * 0.4);
-                double nebula = Math.max(0.0, 1.0 - radial * 1.75);
+            double x = centerX
+                    + Math.sin(time * motion.frequencyX() + motion.phase()) * motion.amplitudeX()
+                    + Math.cos(time * (motion.frequencyY() * 0.72) - motion.phase()) * 42
+                    + Math.sin(time * 0.22 + (i * 0.4)) * (PLACEHOLDER_WIDTH * motion.driftX());
+            double y = centerY
+                    + Math.cos(time * motion.frequencyY() + motion.phase()) * motion.amplitudeY()
+                    + Math.sin(time * (motion.frequencyX() * 0.68) + motion.phase()) * 28
+                    + Math.cos(time * 0.18 + (i * 0.35)) * (PLACEHOLDER_HEIGHT * motion.driftY());
 
-                double red = 0.03 + 0.07 * nebula + 0.05 * field;
-                double green = 0.05 + 0.16 * nebula + 0.08 * field;
-                double blue = 0.10 + 0.24 * nebula + 0.22 * field;
-
-                for (int i = 0; i < orbitX.length; i++) {
-                    double dx = x - orbitX[i];
-                    double dy = y - orbitY[i];
-                    double influence = Math.exp(-(dx * dx + dy * dy) / (2.0 * radius[i] * radius[i]));
-                    red += influence * (0.18 + (i * 0.02));
-                    green += influence * (0.24 + (i * 0.015));
-                    blue += influence * (0.34 + (i * 0.02));
-                }
-
-                double strandOne = Math.sin((normalizedX * 30.0) + time * 2.6)
-                        + Math.cos((normalizedY * 28.0) - time * 1.9);
-                double strandTwo = Math.cos((normalizedX * 20.0) - (normalizedY * 22.0) + time * 1.4);
-                double filament = Math.exp(-Math.abs(strandOne + strandTwo) * 1.6);
-
-                red += filament * 0.05;
-                green += filament * 0.09;
-                blue += filament * 0.12;
-
-                writer.setColor(x, y, Color.color(
-                        Math.min(1.0, red),
-                        Math.min(1.0, green),
-                        Math.min(1.0, blue)
-                ));
-            }
+            particle.setCenterX(x);
+            particle.setCenterY(y);
+            particle.setOpacity(0.38 + 0.28 * (0.5 + 0.5 * Math.sin(time * 0.9 + motion.phase())));
         }
     }
 
@@ -399,6 +422,7 @@ public class HarmonyController {
         keyComboBox.getSelectionModel().selectFirst();
         keyComboBox.setPrefWidth(220);
 
+        List<ChordOption> allChordOptions = buildAllChordOptions();
         Map<String, ComboBox<ChordOption>> mappingBoxes = new LinkedHashMap<>();
         GridPane grid = new GridPane();
         grid.setHgap(12);
@@ -411,6 +435,7 @@ public class HarmonyController {
         for (String gestureCode : GESTURE_CODES) {
             ComboBox<ChordOption> comboBox = new ComboBox<>();
             comboBox.setPrefWidth(220);
+            comboBox.setVisibleRowCount(14);
             comboBox.setCellFactory(listView -> new ListCell<>() {
                 @Override
                 protected void updateItem(ChordOption item, boolean empty) {
@@ -425,35 +450,27 @@ public class HarmonyController {
                     setText(empty || item == null ? null : item.label());
                 }
             });
+            comboBox.getItems().setAll(allChordOptions);
+            comboBox.valueProperty().addListener((observable, oldValue, newValue) -> {
+                if (newValue != null) {
+                    manualChordSelectionsTouched = true;
+                }
+            });
             mappingBoxes.put(gestureCode, comboBox);
             grid.add(new Label(gesturePromptLabel(gestureCode)), 0, row);
             grid.add(comboBox, 1, row);
             row++;
         }
 
-        Runnable refreshMappings = () -> {
-            KeyOption key = keyComboBox.getValue();
-            List<ChordOption> chordOptions = buildChordOptionsForScale(key != null ? key.scaleType() : "major");
-            for (Map.Entry<String, ComboBox<ChordOption>> entry : mappingBoxes.entrySet()) {
-                ComboBox<ChordOption> comboBox = entry.getValue();
-                ChordOption current = comboBox.getValue();
-                comboBox.getItems().setAll(chordOptions);
-                ChordOption preferred = findPreferredChordOption(chordOptions, defaultChordLabelForGesture(entry.getKey(), key));
-                if (current != null && chordOptions.stream().anyMatch(option -> option.label().equals(current.label()))) {
-                    comboBox.getSelectionModel().select(
-                            chordOptions.stream()
-                                    .filter(option -> option.label().equals(current.label()))
-                                    .findFirst()
-                                    .orElse(preferred)
-                    );
-                } else {
-                    comboBox.getSelectionModel().select(preferred);
-                }
+        manualChordSelectionsTouched = false;
+        applyDefaultManualMappings(keyComboBox.getValue(), mappingBoxes, allChordOptions);
+        manualChordSelectionsTouched = false;
+        keyComboBox.valueProperty().addListener((observable, oldValue, newValue) -> {
+            if (!manualChordSelectionsTouched) {
+                applyDefaultManualMappings(newValue, mappingBoxes, allChordOptions);
+                manualChordSelectionsTouched = false;
             }
-        };
-
-        keyComboBox.valueProperty().addListener((observable, oldValue, newValue) -> refreshMappings.run());
-        refreshMappings.run();
+        });
 
         dialog.getDialogPane().setContent(grid);
         dialog.setResultConverter(buttonType -> {
@@ -492,43 +509,103 @@ public class HarmonyController {
         return options;
     }
 
-    private List<ChordOption> buildChordOptionsForScale(String scaleType) {
-        boolean minor = "minor".equalsIgnoreCase(scaleType);
+    private List<ChordOption> buildAllChordOptions() {
         List<ChordOption> options = new ArrayList<>();
-        if (minor) {
-            options.add(new ChordOption("i", List.of(0, 3, 7)));
-            options.add(new ChordOption("ii°", List.of(2, 5, 8)));
-            options.add(new ChordOption("III", List.of(3, 7, 10)));
-            options.add(new ChordOption("iv", List.of(5, 8, 12)));
-            options.add(new ChordOption("v", List.of(7, 10, 14)));
-            options.add(new ChordOption("VI", List.of(8, 12, 15)));
-            options.add(new ChordOption("VII", List.of(10, 14, 17)));
-        } else {
-            options.add(new ChordOption("I", List.of(0, 4, 7)));
-            options.add(new ChordOption("ii", List.of(2, 5, 9)));
-            options.add(new ChordOption("iii", List.of(4, 7, 11)));
-            options.add(new ChordOption("IV", List.of(5, 9, 12)));
-            options.add(new ChordOption("V", List.of(7, 11, 14)));
-            options.add(new ChordOption("vi", List.of(9, 12, 16)));
-            options.add(new ChordOption("vii°", List.of(11, 14, 17)));
+        for (Map.Entry<String, Integer> rootEntry : buildChordRoots().entrySet()) {
+            for (ChordQuality quality : buildChordQualities()) {
+                options.add(new ChordOption(
+                        rootEntry.getKey() + quality.label(),
+                        rootEntry.getValue(),
+                        quality.intervals()
+                ));
+            }
         }
         return options;
     }
 
-    private String defaultChordLabelForGesture(String gestureCode, KeyOption keyOption) {
-        boolean minor = keyOption != null && "minor".equalsIgnoreCase(keyOption.scaleType());
-        return switch (gestureCode) {
-            case "ONE" -> minor ? "i" : "I";
-            case "TWO_MINOR" -> minor ? "ii°" : "ii";
-            case "THREE_MINOR" -> minor ? "III" : "iii";
-            case "FOUR" -> minor ? "iv" : "IV";
-            default -> minor ? "i" : "I";
-        };
+    private Map<String, Integer> buildChordRoots() {
+        Map<String, Integer> roots = new LinkedHashMap<>();
+        roots.put("C", 0);
+        roots.put("C#", 1);
+        roots.put("Db", 1);
+        roots.put("D", 2);
+        roots.put("D#", 3);
+        roots.put("Eb", 3);
+        roots.put("E", 4);
+        roots.put("F", 5);
+        roots.put("F#", 6);
+        roots.put("Gb", 6);
+        roots.put("G", 7);
+        roots.put("G#", 8);
+        roots.put("Ab", 8);
+        roots.put("A", 9);
+        roots.put("A#", 10);
+        roots.put("Bb", 10);
+        roots.put("B", 11);
+        return roots;
     }
 
-    private ChordOption findPreferredChordOption(List<ChordOption> options, String label) {
+    private List<ChordQuality> buildChordQualities() {
+        return List.of(
+                new ChordQuality(" major", List.of(0, 4, 7)),
+                new ChordQuality(" minor", List.of(0, 3, 7)),
+                new ChordQuality(" diminished", List.of(0, 3, 6)),
+                new ChordQuality(" augmented", List.of(0, 4, 8)),
+                new ChordQuality(" sus2", List.of(0, 2, 7)),
+                new ChordQuality(" sus4", List.of(0, 5, 7)),
+                new ChordQuality(" 5", List.of(0, 7)),
+                new ChordQuality(" 6", List.of(0, 4, 7, 9)),
+                new ChordQuality(" minor 6", List.of(0, 3, 7, 9)),
+                new ChordQuality(" 7", List.of(0, 4, 7, 10)),
+                new ChordQuality(" major 7", List.of(0, 4, 7, 11)),
+                new ChordQuality(" minor 7", List.of(0, 3, 7, 10)),
+                new ChordQuality(" minor-major 7", List.of(0, 3, 7, 11)),
+                new ChordQuality(" diminished 7", List.of(0, 3, 6, 9)),
+                new ChordQuality(" half-diminished 7", List.of(0, 3, 6, 10)),
+                new ChordQuality(" add9", List.of(0, 4, 7, 14)),
+                new ChordQuality(" minor add9", List.of(0, 3, 7, 14)),
+                new ChordQuality(" 9", List.of(0, 4, 7, 10, 14)),
+                new ChordQuality(" major 9", List.of(0, 4, 7, 11, 14)),
+                new ChordQuality(" minor 9", List.of(0, 3, 7, 10, 14)),
+                new ChordQuality(" 11", List.of(0, 4, 7, 10, 14, 17)),
+                new ChordQuality(" minor 11", List.of(0, 3, 7, 10, 14, 17)),
+                new ChordQuality(" 13", List.of(0, 4, 7, 10, 14, 17, 21)),
+                new ChordQuality(" minor 13", List.of(0, 3, 7, 10, 14, 17, 21)),
+                new ChordQuality(" 7sus2", List.of(0, 2, 7, 10)),
+                new ChordQuality(" 7sus4", List.of(0, 5, 7, 10))
+        );
+    }
+
+    private void applyDefaultManualMappings(
+            KeyOption keyOption,
+            Map<String, ComboBox<ChordOption>> mappingBoxes,
+            List<ChordOption> allChordOptions
+    ) {
+        if (keyOption == null) {
+            return;
+        }
+
+        int tonic = Math.floorMod(keyOption.rootNote() - 48, 12);
+        boolean minor = "minor".equalsIgnoreCase(keyOption.scaleType());
+
+        Map<String, ChordOption> defaults = new LinkedHashMap<>();
+        defaults.put("ONE", findChordOption(allChordOptions, tonic, minor ? " minor" : " major"));
+        defaults.put("TWO_MINOR", findChordOption(allChordOptions, tonic + 2, minor ? " diminished" : " minor"));
+        defaults.put("THREE_MINOR", findChordOption(allChordOptions, tonic + (minor ? 3 : 4), minor ? " major" : " minor"));
+        defaults.put("FOUR", findChordOption(allChordOptions, tonic + 5, minor ? " minor" : " major"));
+
+        for (Map.Entry<String, ComboBox<ChordOption>> entry : mappingBoxes.entrySet()) {
+            ChordOption option = defaults.get(entry.getKey());
+            if (option != null) {
+                entry.getValue().getSelectionModel().select(option);
+            }
+        }
+    }
+
+    private ChordOption findChordOption(List<ChordOption> options, int rootSemitone, String qualitySuffix) {
         return options.stream()
-                .filter(option -> option.label().equals(label))
+                .filter(option -> option.rootSemitone() == Math.floorMod(rootSemitone, 12))
+                .filter(option -> option.label().endsWith(qualitySuffix))
                 .findFirst()
                 .orElse(options.getFirst());
     }
@@ -571,6 +648,7 @@ public class HarmonyController {
                 ChordOption option = config.mappings().get(gestureCode);
                 json.append("    \"").append(gestureCode).append("\": {\n");
                 json.append("      \"label\": \"").append(escapeJson(option.label())).append("\",\n");
+                json.append("      \"root_semitone\": ").append(option.rootSemitone()).append(",\n");
                 json.append("      \"intervals\": [");
                 for (int i = 0; i < option.intervals().size(); i++) {
                     if (i > 0) {
@@ -1384,8 +1462,8 @@ public class HarmonyController {
     private void showVideoPreview(Path videoPath) {
         stopPreviewPlayer();
 
-        previewImageView.setVisible(false);
-        previewImageView.setManaged(false);
+        placeholderPane.setVisible(false);
+        placeholderPane.setManaged(false);
         outputMediaView.setVisible(true);
         outputMediaView.setManaged(true);
 
@@ -1407,8 +1485,8 @@ public class HarmonyController {
         stopPreviewPlayer();
         outputMediaView.setVisible(false);
         outputMediaView.setManaged(false);
-        previewImageView.setVisible(true);
-        previewImageView.setManaged(true);
+        placeholderPane.setVisible(true);
+        placeholderPane.setManaged(true);
         previewActions.setVisible(false);
         previewActions.setManaged(false);
     }

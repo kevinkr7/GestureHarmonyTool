@@ -5,8 +5,8 @@
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ProgressIndicator?>
-<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.layout.HBox?>
+<?import javafx.scene.layout.Pane?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
 <?import javafx.scene.media.MediaView?>
@@ -24,7 +24,7 @@
     <Label fx:id="sessionLabel" text="Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4." styleClass="session-pill" wrapText="true"/>
 
     <StackPane prefWidth="920.0" prefHeight="520.0" styleClass="preview-wrapper">
-        <ImageView fx:id="previewImageView" fitWidth="900.0" fitHeight="500.0" preserveRatio="true" styleClass="preview-image"/>
+        <Pane fx:id="placeholderPane" prefWidth="900.0" prefHeight="500.0" minWidth="900.0" minHeight="500.0" maxWidth="900.0" maxHeight="500.0" styleClass="placeholder-pane"/>
         <MediaView fx:id="outputMediaView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
 
         <VBox fx:id="processingOverlay" alignment="CENTER" spacing="10.0" styleClass="processing-overlay" visible="false" managed="false">

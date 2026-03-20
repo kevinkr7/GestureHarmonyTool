@@ -165,7 +165,9 @@ def load_chord_preferences(session_path: Path | str) -> dict:
     return data
 
 
-def resolve_chord_strategy(session_path: Path, source_vocal: Path) -> tuple[int, str, dict[str, list[int]], str]:
+def resolve_chord_strategy(
+    session_path: Path, source_vocal: Path
+) -> tuple[int, str, dict[str, list[int] | dict[str, int | list[int] | str]], str]:
     preferences = load_chord_preferences(session_path)
     mode = str(preferences.get("mode", "automatic")).lower()
 
@@ -183,13 +185,18 @@ def resolve_chord_strategy(session_path: Path, source_vocal: Path) -> tuple[int,
         scale_type = "major"
 
     fallback_map = MANUAL_MINOR_CHORD_MAP if scale_type == "minor" else MANUAL_MAJOR_CHORD_MAP
-    chord_map: dict[str, list[int]] = {}
+    chord_map: dict[str, list[int] | dict[str, int | list[int] | str]] = {}
 
     for degree, fallback_intervals in fallback_map.items():
         manual_mapping = mappings.get(degree) or {}
         intervals = manual_mapping.get("intervals")
-        if isinstance(intervals, list) and len(intervals) >= 3:
-            chord_map[degree] = [int(value) for value in intervals[:3]]
+        root_semitone = manual_mapping.get("root_semitone")
+        if isinstance(intervals, list) and len(intervals) >= 2 and root_semitone is not None:
+            chord_map[degree] = {
+                "root_semitone": int(root_semitone) % 12,
+                "intervals": [int(value) for value in intervals],
+                "label": str(manual_mapping.get("label", degree)),
+            }
         else:
             chord_map[degree] = fallback_intervals
 
@@ -202,7 +209,7 @@ def generate_chord_midi(
     output_midi: Path | str,
     root_note: int,
     scale_type: str,
-    chord_map: dict[str, list[int]] | None = None,
+    chord_map: dict[str, list[int] | dict[str, int | list[int] | str]] | None = None,
 ) -> Path:
     if pretty_midi is None:
         raise RuntimeError("pretty_midi is required to generate MIDI chords")
@@ -233,11 +240,18 @@ def generate_chord_midi(
             pretty_midi.ControlChange(number=64, value=0, time=max(block["start"] + 0.001, pedal_end))
         )
 
-        intervals = chord_map.get(block["degree"], chord_map["ONE"])
+        mapping = chord_map.get(block["degree"], chord_map["ONE"])
+        if isinstance(mapping, dict):
+            intervals = [int(value) for value in mapping.get("intervals", [])]
+            chord_root = 48 + int(mapping.get("root_semitone", 0))
+        else:
+            intervals = [int(value) for value in mapping]
+            chord_root = root_note
+
         for interval in intervals:
             note = pretty_midi.Note(
                 velocity=96,
-                pitch=root_note + interval,
+                pitch=chord_root + interval,
                 start=block["start"],
                 end=note_end,
             )
