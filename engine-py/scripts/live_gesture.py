@@ -29,6 +29,8 @@ GESTURE_LABELS = {
 
 def decode_mjpeg_frames(stream, chunk_size: int = 16384) -> "tuple[np.ndarray, bool]":
     buffer = bytearray()
+    soi = b"\xff\xd8"
+    eoi = b"\xff\xd9"
     while True:
         chunk = stream.read(chunk_size)
         if not chunk:
@@ -36,14 +38,21 @@ def decode_mjpeg_frames(stream, chunk_size: int = 16384) -> "tuple[np.ndarray, b
         buffer.extend(chunk)
 
         while True:
-            start = buffer.find(b"\xff\xd8")
+            start = buffer.find(soi)
             if start < 0:
+                # Keep a small trailing window to catch split SOI markers across chunks.
+                if len(buffer) > 2:
+                    del buffer[:-2]
                 break
-            end = buffer.find(b"\xff\xd9", start + 2)
+            if start > 0:
+                del buffer[:start]
+
+            end = buffer.find(eoi, 2)
             if end < 0:
                 break
 
-            arr = np.frombuffer(memoryview(buffer)[start:end + 2], dtype=np.uint8)
+            jpg = bytes(buffer[: end + 2])
+            arr = np.frombuffer(jpg, dtype=np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
             del buffer[: end + 2]
             if frame is not None:
