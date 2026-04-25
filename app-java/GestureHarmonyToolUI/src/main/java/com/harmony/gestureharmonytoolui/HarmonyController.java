@@ -38,6 +38,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -48,6 +50,7 @@ public class HarmonyController {
     private static final List<String> GESTURE_CODES = List.of("ONE", "TWO_MINOR", "THREE_MINOR", "FOUR");
     private static final int PLACEHOLDER_WIDTH = 900;
     private static final int PLACEHOLDER_HEIGHT = 500;
+    private static final Pattern FFMPEG_FRAME_PROGRESS_PATTERN = Pattern.compile("frame=\\s*(\\d+)");
 
     private String currentSessionPath;
     private boolean isRecording;
@@ -864,7 +867,14 @@ public class HarmonyController {
                 return false;
             }
 
-            reportFfmpegStartupError(snapshotFfmpegLogs());
+            List<String> tail = snapshotFfmpegLogs();
+            if (!containsFatalStartupError(tail)) {
+                // ffmpeg may emit progress on carriage-return updates that do not always parse cleanly
+                // via line-based reads; keep the process running when there are no startup errors.
+                return true;
+            }
+
+            reportFfmpegStartupError(tail);
             cleanupFfmpegHandles();
             return false;
         } catch (Exception e) {
@@ -877,12 +887,28 @@ public class HarmonyController {
     private boolean containsFfmpegFrameProgress() {
         synchronized (recentFfmpegLogs) {
             for (String line : recentFfmpegLogs) {
-                if (line.contains("frame=") && !line.contains("frame=    0")) {
-                    return true;
+                Matcher matcher = FFMPEG_FRAME_PROGRESS_PATTERN.matcher(line);
+                while (matcher.find()) {
+                    try {
+                        if (Integer.parseInt(matcher.group(1)) > 0) {
+                            return true;
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
                 }
             }
         }
         return false;
+    }
+
+    private boolean containsFatalStartupError(List<String> logs) {
+        String joined = String.join(" | ", logs).toLowerCase();
+        return joined.contains("could not find video device")
+                || joined.contains("could not find audio device")
+                || joined.contains("error opening input")
+                || joined.contains("no such device")
+                || joined.contains("device or resource busy")
+                || joined.contains("invalid argument");
     }
 
     private List<String> snapshotFfmpegLogs() {
