@@ -27,10 +27,10 @@ GESTURE_LABELS = {
 }
 
 
-def decode_mjpeg_frames(stream) -> "tuple[np.ndarray, bool]":
+def decode_mjpeg_frames(stream, chunk_size: int = 16384) -> "tuple[np.ndarray, bool]":
     buffer = bytearray()
     while True:
-        chunk = stream.read(4096)
+        chunk = stream.read(chunk_size)
         if not chunk:
             break
         buffer.extend(chunk)
@@ -43,11 +43,9 @@ def decode_mjpeg_frames(stream) -> "tuple[np.ndarray, bool]":
             if end < 0:
                 break
 
-            jpg = bytes(buffer[start:end + 2])
-            del buffer[: end + 2]
-
-            arr = np.frombuffer(jpg, dtype=np.uint8)
+            arr = np.frombuffer(memoryview(buffer)[start:end + 2], dtype=np.uint8)
             frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            del buffer[: end + 2]
             if frame is not None:
                 yield frame, False
 
@@ -103,12 +101,12 @@ def preview_mode(session_path: Path) -> int:
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
-            if ts - last_flush >= 0.5:
-                timeline.write(timeline_path, ts)
+            if timeline.is_dirty and ts - last_flush >= 0.5:
+                timeline.write(timeline_path, ts, pretty=False)
                 last_flush = ts
     finally:
         end_ts = max(0.0, time.monotonic() - start)
-        timeline.write(timeline_path, end_ts)
+        timeline.write(timeline_path, end_ts, pretty=True, force=True)
         if writer is not None:
             writer.release()
         recognizer.close()

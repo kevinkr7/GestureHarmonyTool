@@ -17,6 +17,8 @@ class GestureRecognizer:
             min_tracking_confidence=0.6,
         )
         self.buffer: deque[str] = deque(maxlen=window_size)
+        self._buffer_counts: dict[str, int] = {}
+        self._last_smoothed = "ONE"
 
     def close(self) -> None:
         self.hands.close()
@@ -37,8 +39,27 @@ class GestureRecognizer:
         return self._smooth(degree)
 
     def _smooth(self, degree: str) -> str:
+        if len(self.buffer) == self.buffer.maxlen:
+            dropped = self.buffer.popleft()
+            dropped_count = self._buffer_counts.get(dropped, 0) - 1
+            if dropped_count <= 0:
+                self._buffer_counts.pop(dropped, None)
+            else:
+                self._buffer_counts[dropped] = dropped_count
+
         self.buffer.append(degree)
-        return max(set(self.buffer), key=self.buffer.count)
+        self._buffer_counts[degree] = self._buffer_counts.get(degree, 0) + 1
+
+        # Keep prior winning degree on ties to prevent label flicker.
+        best_degree = self._last_smoothed
+        best_count = self._buffer_counts.get(best_degree, -1)
+        for candidate, count in self._buffer_counts.items():
+            if count > best_count:
+                best_degree = candidate
+                best_count = count
+
+        self._last_smoothed = best_degree
+        return best_degree
 
     def _finger_states(self, hand) -> dict[str, bool]:
         lms = hand.landmark

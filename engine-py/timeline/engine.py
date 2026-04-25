@@ -21,6 +21,12 @@ class TimelineEngine:
         self.current_start = 0.0
         self.pending_degree: str | None = None
         self.pending_since: float = 0.0
+        self._dirty = True
+        self._last_serialized: str | None = None
+
+    @property
+    def is_dirty(self) -> bool:
+        return self._dirty
 
     def update(self, degree: str, ts: float) -> None:
         if degree == self.current_degree:
@@ -39,6 +45,7 @@ class TimelineEngine:
         self.current_degree = degree
         self.current_start = ts
         self.pending_degree = None
+        self._dirty = True
 
     def finalize(self, end_ts: float) -> list[dict]:
         merged: list[dict] = []
@@ -63,10 +70,16 @@ class TimelineEngine:
             merged = [{"start": 0.0, "end": max(0.5, round(end_ts, 3)), "degree": "ONE"}]
         return merged
 
-    def write(self, out_path: Path, end_ts: float) -> list[dict]:
+    def write(self, out_path: Path, end_ts: float, *, pretty: bool = True, force: bool = False) -> list[dict]:
         timeline = self.finalize(end_ts)
+        serialized = json.dumps(timeline, indent=2 if pretty else None)
+        if not force and not self._dirty and serialized == self._last_serialized:
+            return timeline
+
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(timeline, indent=2), encoding="utf-8")
+        out_path.write_text(serialized, encoding="utf-8")
+        self._dirty = False
+        self._last_serialized = serialized
         return timeline
 
     def _close_current(self, ts: float) -> None:
