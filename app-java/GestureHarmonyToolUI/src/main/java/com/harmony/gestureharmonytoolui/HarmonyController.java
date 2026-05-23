@@ -103,6 +103,47 @@ public class HarmonyController {
     }
 
     private record ChordQuality(String label, List<Integer> intervals) {
+        @Override
+        public String toString() {
+            return label;
+        }
+    }
+
+    private record FingerChordSelectors(ComboBox<String> rootComboBox, ComboBox<ChordQuality> qualityComboBox, Map<String, Integer> chordRoots) {
+        ChordOption toChordOption() {
+            String rootLabel = rootComboBox.getValue();
+            ChordQuality quality = qualityComboBox.getValue();
+            if (rootLabel == null || quality == null) {
+                return null;
+            }
+            Integer semitone = chordRoots.get(rootLabel);
+            if (semitone == null) {
+                return null;
+            }
+            return new ChordOption(rootLabel + quality.label(), semitone, quality.intervals());
+        }
+
+        void selectChord(ChordOption option, List<ChordQuality> qualities) {
+            if (option == null) {
+                return;
+            }
+            String rootLabel = chordRoots.entrySet().stream()
+                    .filter(entry -> entry.getValue() == option.rootSemitone())
+                    .map(Map.Entry::getKey)
+                    .findFirst()
+                    .orElse(null);
+            if (rootLabel != null) {
+                rootComboBox.getSelectionModel().select(rootLabel);
+            }
+
+            ChordQuality matchingQuality = qualities.stream()
+                    .filter(quality -> quality.intervals().equals(option.intervals()))
+                    .findFirst()
+                    .orElse(null);
+            if (matchingQuality != null) {
+                qualityComboBox.getSelectionModel().select(matchingQuality);
+            }
+        }
     }
 
     private record KeyOption(String label, int rootNote, String scaleType) {
@@ -426,7 +467,9 @@ public class HarmonyController {
         keyComboBox.setPrefWidth(220);
 
         List<ChordOption> allChordOptions = buildAllChordOptions();
-        Map<String, ComboBox<ChordOption>> mappingBoxes = new LinkedHashMap<>();
+        List<ChordQuality> chordQualities = buildChordQualities();
+        List<String> chordRoots = new ArrayList<>(buildChordRoots().keySet());
+        Map<String, FingerChordSelectors> mappingBoxes = new LinkedHashMap<>();
         GridPane grid = new GridPane();
         grid.setHgap(12);
         grid.setVgap(12);
@@ -436,32 +479,32 @@ public class HarmonyController {
 
         int row = 1;
         for (String gestureCode : GESTURE_CODES) {
-            ComboBox<ChordOption> comboBox = new ComboBox<>();
-            comboBox.setPrefWidth(220);
-            comboBox.setVisibleRowCount(14);
-            comboBox.setCellFactory(listView -> new ListCell<>() {
-                @Override
-                protected void updateItem(ChordOption item, boolean empty) {
-                    super.updateItem(item, empty);
-                    setText(empty || item == null ? null : item.label());
-                }
-            });
-            comboBox.setButtonCell(new ListCell<>() {
-                @Override
-                protected void updateItem(ChordOption item, boolean empty) {
-                    super.updateItem(item, empty);
-                    setText(empty || item == null ? null : item.label());
-                }
-            });
-            comboBox.getItems().setAll(allChordOptions);
-            comboBox.valueProperty().addListener((observable, oldValue, newValue) -> {
+            ComboBox<String> rootComboBox = new ComboBox<>();
+            rootComboBox.setPrefWidth(95);
+            rootComboBox.setVisibleRowCount(14);
+            rootComboBox.getItems().setAll(chordRoots);
+
+            ComboBox<ChordQuality> qualityComboBox = new ComboBox<>();
+            qualityComboBox.setPrefWidth(145);
+            qualityComboBox.setVisibleRowCount(14);
+            qualityComboBox.getItems().setAll(chordQualities);
+
+            rootComboBox.valueProperty().addListener((observable, oldValue, newValue) -> {
                 if (newValue != null) {
                     manualChordSelectionsTouched = true;
                 }
             });
-            mappingBoxes.put(gestureCode, comboBox);
+            qualityComboBox.valueProperty().addListener((observable, oldValue, newValue) -> {
+                if (newValue != null) {
+                    manualChordSelectionsTouched = true;
+                }
+            });
+
+            FingerChordSelectors selectors = new FingerChordSelectors(rootComboBox, qualityComboBox, buildChordRoots());
+            mappingBoxes.put(gestureCode, selectors);
+            HBox mappingRow = new HBox(8, rootComboBox, qualityComboBox);
             grid.add(new Label(gesturePromptLabel(gestureCode)), 0, row);
-            grid.add(comboBox, 1, row);
+            grid.add(mappingRow, 1, row);
             row++;
         }
 
@@ -488,7 +531,7 @@ public class HarmonyController {
 
             Map<String, ChordOption> mappings = new LinkedHashMap<>();
             for (String gestureCode : GESTURE_CODES) {
-                ChordOption option = mappingBoxes.get(gestureCode).getValue();
+                ChordOption option = mappingBoxes.get(gestureCode).toChordOption();
                 if (option == null) {
                     return null;
                 }
@@ -581,7 +624,7 @@ public class HarmonyController {
 
     private void applyDefaultManualMappings(
             KeyOption keyOption,
-            Map<String, ComboBox<ChordOption>> mappingBoxes,
+            Map<String, FingerChordSelectors> mappingBoxes,
             List<ChordOption> allChordOptions
     ) {
         if (keyOption == null) {
@@ -597,10 +640,11 @@ public class HarmonyController {
         defaults.put("THREE_MINOR", findChordOption(allChordOptions, tonic + (minor ? 3 : 4), minor ? " major" : " minor"));
         defaults.put("FOUR", findChordOption(allChordOptions, tonic + 5, minor ? " minor" : " major"));
 
-        for (Map.Entry<String, ComboBox<ChordOption>> entry : mappingBoxes.entrySet()) {
+        List<ChordQuality> qualities = buildChordQualities();
+        for (Map.Entry<String, FingerChordSelectors> entry : mappingBoxes.entrySet()) {
             ChordOption option = defaults.get(entry.getKey());
             if (option != null) {
-                entry.getValue().getSelectionModel().select(option);
+                entry.getValue().selectChord(option, qualities);
             }
         }
     }
