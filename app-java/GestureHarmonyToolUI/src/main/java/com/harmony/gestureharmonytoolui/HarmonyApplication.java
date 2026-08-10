@@ -21,6 +21,13 @@ public class HarmonyApplication extends Application {
 
         stage.setOnCloseRequest(event -> controller.shutdown());
         stage.setScene(scene);
+        
+        javafx.geometry.Rectangle2D bounds = javafx.stage.Screen.getPrimary().getVisualBounds();
+        stage.setX(bounds.getMinX());
+        stage.setY(bounds.getMinY());
+        stage.setWidth(bounds.getWidth());
+        stage.setHeight(bounds.getHeight());
+        
         stage.show();
 
         File file = new File(AppPaths.SESSIONS);

@@ -30,7 +30,17 @@ DEFAULT_STABLE_MS = 0.0
 DEFAULT_MIN_SEGMENT_S = 0.0
 
 
-def decode_mjpeg_frames(stream, chunk_size: int = 16384) -> "tuple[np.ndarray, bool]":
+_MAX_BUFFER_BYTES = 2 * 1024 * 1024  # 2 MB cap — discard stale data if pipeline stalls
+
+
+def decode_mjpeg_frames(stream, chunk_size: int = 65536) -> "tuple[np.ndarray, bool]":
+    """Decode MJPEG frames from a raw byte stream.
+
+    Uses 64 KB reads (vs the original 16 KB) to cut syscall overhead by 4×.
+    A 2 MB hard cap on the internal buffer prevents unbounded memory growth when
+    the consumer (gesture/HUD thread) falls behind — stale bytes are discarded and
+    the parser re-syncs to the next SOI marker automatically.
+    """
     buffer = bytearray()
     soi = b"\xff\xd8"
     eoi = b"\xff\xd9"
@@ -39,6 +49,13 @@ def decode_mjpeg_frames(stream, chunk_size: int = 16384) -> "tuple[np.ndarray, b
         if not chunk:
             break
         buffer.extend(chunk)
+
+        # Hard cap: if the buffer has grown too large the consumer is stalled.
+        # Drop everything before the second-to-last SOI so we stay real-time.
+        if len(buffer) > _MAX_BUFFER_BYTES:
+            last_soi = buffer.rfind(soi, 1)  # find the most-recent SOI
+            if last_soi > 0:
+                del buffer[:last_soi]
 
         while True:
             start = buffer.find(soi)

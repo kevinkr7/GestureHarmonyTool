@@ -5,17 +5,16 @@
 <?import javafx.scene.control.ComboBox?>
 <?import javafx.scene.control.Label?>
 <?import javafx.scene.control.ProgressIndicator?>
+<?import javafx.scene.image.ImageView?>
 <?import javafx.scene.layout.HBox?>
 <?import javafx.scene.layout.Pane?>
 <?import javafx.scene.layout.StackPane?>
 <?import javafx.scene.layout.VBox?>
 <?import javafx.scene.media.MediaView?>
 
-<VBox alignment="TOP_CENTER" spacing="16.0"
-      styleClass="root-shell"
+<VBox alignment="TOP_CENTER" spacing="16.0" styleClass="root-shell"
       xmlns:fx="http://javafx.com/fxml"
       fx:controller="com.harmony.gestureharmonytoolui.HarmonyController">
-
     <padding>
         <Insets bottom="22.0" left="22.0" right="22.0" top="22.0"/>
     </padding>
@@ -23,9 +22,10 @@
     <Label text="Gesture Harmony Studio" styleClass="app-title"/>
     <Label fx:id="sessionLabel" text="Gestures: 1 finger = 1, 2 fingers = 2m, 3 fingers = 3m, 4 fingers = 4." styleClass="session-pill" wrapText="true"/>
 
-    <StackPane prefWidth="920.0" prefHeight="520.0" styleClass="preview-wrapper">
-        <Pane fx:id="placeholderPane" prefWidth="900.0" prefHeight="500.0" minWidth="900.0" minHeight="500.0" maxWidth="900.0" maxHeight="500.0" styleClass="placeholder-pane"/>
-        <MediaView fx:id="outputMediaView" visible="false" managed="false" fitWidth="900.0" fitHeight="500.0" preserveRatio="true"/>
+    <StackPane VBox.vgrow="ALWAYS" styleClass="preview-wrapper" minHeight="200.0" minWidth="300.0">
+        <Pane fx:id="placeholderPane" maxWidth="Infinity" maxHeight="Infinity" styleClass="placeholder-pane"/>
+        <ImageView fx:id="livePreviewImageView" visible="false" managed="false" preserveRatio="true"/>
+        <MediaView fx:id="outputMediaView" visible="false" managed="false" preserveRatio="true"/>
 
         <VBox fx:id="processingOverlay" alignment="CENTER" spacing="10.0" styleClass="processing-overlay" visible="false" managed="false">
             <ProgressIndicator prefWidth="64.0" prefHeight="64.0"/>
@@ -40,15 +40,15 @@
     </HBox>
 
     <HBox spacing="15.0" alignment="CENTER">
-        <Button fx:id="startRecording" text="Start Recording" onAction="#startRecordingOnClick" styleClass="primary-button"/>
-        <Button fx:id="stopRecording" text="Stop Recording" disable="true" onAction="#stopRecordingOnClick" styleClass="secondary-button"/>
-        <Button fx:id="cancelRecording" text="Cancel Recording" disable="true" onAction="#cancelRecordingOnClick" styleClass="danger-button"/>
+        <Button fx:id="startRecording" text="Start Recording" onAction="#startRecordingOnClick" styleClass="button primary-button"/>
+        <Button fx:id="stopRecording" text="Stop Recording" disable="true" onAction="#stopRecordingOnClick" styleClass="button secondary-button"/>
+        <Button fx:id="cancelRecording" text="Cancel Recording" disable="true" onAction="#cancelRecordingOnClick" styleClass="button danger-button"/>
     </HBox>
 
     <HBox fx:id="previewActions" spacing="12.0" alignment="CENTER" visible="false" managed="false">
-        <Button fx:id="playPauseButton" text="Pause" disable="true" onAction="#playPauseOnClick" styleClass="secondary-button"/>
-        <Button fx:id="replayButton" text="Replay" disable="true" onAction="#replayOnClick" styleClass="secondary-button"/>
-        <Button fx:id="saveVideoButton" text="Save Harmonized Video" disable="true" onAction="#saveVideoOnClick" styleClass="primary-button"/>
+        <Button fx:id="playPauseButton" text="Pause" disable="true" onAction="#playPauseOnClick" styleClass="button secondary-button"/>
+        <Button fx:id="replayButton" text="Replay" disable="true" onAction="#replayOnClick" styleClass="button secondary-button"/>
+        <Button fx:id="saveVideoButton" text="Save Harmonized Video" disable="true" onAction="#saveVideoOnClick" styleClass="button primary-button"/>
     </HBox>
 
     <Label fx:id="status" text="Status: Ready" styleClass="status-line" wrapText="true"/>

@@ -11,10 +11,13 @@ import javafx.scene.control.Dialog;
 import javafx.scene.control.Label;
 import javafx.scene.control.ListCell;
 import javafx.scene.layout.GridPane;
+import javafx.scene.layout.HBox;
 import javafx.scene.layout.Pane;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
 import javafx.scene.media.MediaView;
+import javafx.scene.image.Image;
+import javafx.scene.image.ImageView;
 import javafx.scene.paint.Color;
 import javafx.scene.paint.CycleMethod;
 import javafx.scene.paint.RadialGradient;
@@ -30,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -88,6 +92,7 @@ public class HarmonyController {
     @FXML private ComboBox<MediaDevice> audioDeviceComboBox;
 
     @FXML private Pane placeholderPane;
+    @FXML private ImageView livePreviewImageView;
     @FXML private MediaView outputMediaView;
 
     private enum ChordMode {
@@ -198,6 +203,9 @@ public class HarmonyController {
         previewActions.setVisible(false);
         previewActions.setManaged(false);
         sessionLabel.setText(GESTURE_GUIDE + " Recording captures the gesture-feedback window output.");
+        
+        livePreviewImageView.fitWidthProperty().bind(placeholderPane.widthProperty());
+        livePreviewImageView.fitHeightProperty().bind(placeholderPane.heightProperty());
     }
 
     private void loadPlaceholderImage() {
@@ -1307,7 +1315,21 @@ public class HarmonyController {
                         new InputStreamReader(cameraStreamProcess.getInputStream(), StandardCharsets.UTF_8))) {
                     String line;
                     while ((line = br.readLine()) != null) {
-                        System.out.println("[live_gesture] " + line);
+                        if (line.startsWith("FRAME:")) {
+                            try {
+                                String b64 = line.substring(6);
+                                byte[] imgBytes = Base64.getDecoder().decode(b64);
+                                ByteArrayInputStream bais = new ByteArrayInputStream(imgBytes);
+                                Image img = new Image(bais);
+                                Platform.runLater(() -> {
+                                    livePreviewImageView.setImage(img);
+                                });
+                            } catch (Exception e) {
+                                System.out.println("[live_gesture] Error decoding frame: " + e.getMessage());
+                            }
+                        } else {
+                            System.out.println("[live_gesture] " + line);
+                        }
                     }
                 } catch (IOException ignored) {
                 }
@@ -1321,7 +1343,7 @@ public class HarmonyController {
                 return false;
             }
 
-            Platform.runLater(this::showPlaceholderImage);
+            Platform.runLater(this::showLivePreview);
             return true;
         } catch (Exception e) {
             e.printStackTrace();
@@ -1534,6 +1556,8 @@ public class HarmonyController {
 
         placeholderPane.setVisible(false);
         placeholderPane.setManaged(false);
+        livePreviewImageView.setVisible(false);
+        livePreviewImageView.setManaged(false);
         outputMediaView.setVisible(true);
         outputMediaView.setManaged(true);
 
@@ -1555,10 +1579,24 @@ public class HarmonyController {
         stopPreviewPlayer();
         outputMediaView.setVisible(false);
         outputMediaView.setManaged(false);
+        livePreviewImageView.setVisible(false);
+        livePreviewImageView.setManaged(false);
         placeholderPane.setVisible(true);
         placeholderPane.setManaged(true);
         previewActions.setVisible(false);
         previewActions.setManaged(false);
+    }
+
+    private void showLivePreview() {
+        stopPreviewPlayer();
+        outputMediaView.setVisible(false);
+        outputMediaView.setManaged(false);
+        placeholderPane.setVisible(false);
+        placeholderPane.setManaged(false);
+        previewActions.setVisible(false);
+        previewActions.setManaged(false);
+        livePreviewImageView.setVisible(true);
+        livePreviewImageView.setManaged(true);
     }
 
     private void resetPreviewForNewCapture() {
